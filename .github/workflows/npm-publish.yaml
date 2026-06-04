@@ -1,0 +1,85 @@
+name: Publish to npm
+
+# Fires automatically when a GitHub Release is published (the public repo's
+# release.yaml creates one when a release PR merges to main or to a
+# preview-<slug> branch). Also exposes a manual workflow_dispatch for
+# bootstrap, dry-runs, and dist-tag overrides.
+#
+# On release events the dist-tag is derived from package.json's version:
+# X.Y.Z-preview.<slug> publishes under dist-tag preview-<slug>; any other
+# version publishes under dist-tag latest.
+
+on:
+  release:
+    types:
+      - 'published'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm dist-tag to publish under. Overrides the derived dist-tag.'
+        required: false
+        default: 'latest'
+        type: string
+      dry_run:
+        description: 'Run npm publish --dry-run (no upload). Defaults to true so a casual manual trigger does not publish.'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  NODE_VERSION: '22.19.0'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # protected-main-env restricts secrets/OIDC to the default branch and tags.
+    # Must exist on the public repo before the first run; see release docs.
+    environment: protected-main-env
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Verify package is in the @datadog scope
+        run: |
+          NAME=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).name)")
+          case "$NAME" in
+            @datadog/*) echo "Publishing $NAME";;
+            *) echo "Refusing to publish: package name '$NAME' is not in the @datadog scope"; exit 1;;
+          esac
+
+      - name: Setup NodeJs
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Derive dist-tag from version
+        id: derive
+        run: |
+          VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")
+          # Preview versions look like X.Y.Z-preview.<slug>; they publish
+          # under dist-tag preview-<slug>. Anything else is stable.
+          if [[ "${VERSION}" =~ -preview\.([a-z0-9-]+)$ ]]; then
+            DERIVED_TAG="preview-${BASH_REMATCH[1]}"
+          else
+            DERIVED_TAG="latest"
+          fi
+          echo "tag=${DERIVED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Derived dist-tag '${DERIVED_TAG}' from version '${VERSION}'"
+
+      - name: Publish
+        env:
+          # On release events `inputs.tag` is empty and we fall back to the
+          # version-derived tag. On workflow_dispatch the user's input wins
+          # (default 'latest', overridable to anything they choose).
+          NPM_TAG: ${{ inputs.tag || steps.derive.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          ARGS="--provenance --access public --tag ${NPM_TAG}"
+          if [ "${DRY_RUN}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          npm publish $ARGS
