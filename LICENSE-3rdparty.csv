@@ -1,0 +1,5 @@
+Component,Origin,License,Copyright
+@earendil-works/pi-coding-agent,https://www.npmjs.com/package/@earendil-works/pi-coding-agent,MIT,Mario Zechner / earendil.works
+@modelcontextprotocol/sdk,https://www.npmjs.com/package/@modelcontextprotocol/sdk,MIT,Anthropic PBC
+open,https://www.npmjs.com/package/open,MIT,Sindre Sorhus
+typebox,https://www.npmjs.com/package/typebox,MIT,Haydn Paterson
