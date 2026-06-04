@@ -28,6 +28,12 @@ on:
 
 env:
   NODE_VERSION: '22.19.0'
+  # OIDC trusted-publishing auth requires npm >= 11.5.1. Node 22.19.0
+  # bundles npm 10.9.x, which signs provenance but cannot authenticate the
+  # publish, so the upload 404s. Pin an exact known-good npm rather than
+  # @latest to avoid pulling a compromised release (npm has been a recurring
+  # supply-chain target). Bump deliberately.
+  NPM_VERSION: '11.16.0'
 
 jobs:
   publish:
@@ -55,6 +61,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Pin npm (OIDC trusted publishing needs >= 11.5.1)
+        run: |
+          npm install -g "npm@${NPM_VERSION}"
+          echo "npm is now $(npm --version)"
 
       - name: Derive dist-tag from version
         id: derive
