@@ -24,7 +24,7 @@ Pi does not have built-in MCP support — it is intentionally minimal. This plug
 pi install npm:@datadog/pi-plugin
 ```
 
-This pulls the plugin and its dependencies (including the MCP SDK) into Pi's extension directory. Restart Pi after install.
+This adds the package to Pi's global settings and installs the plugin plus its runtime dependencies (including the MCP SDK) into Pi's npm package cache. Restart Pi after install.
 
 **2. Start Pi** in your project:
 
@@ -95,7 +95,7 @@ By default OAuth callbacks come back on `http://localhost:19876/callback`. Overr
 
 ### Configuration storage and per-project overrides
 
-`pi install npm:@datadog/pi-plugin` installs into Pi's global extensions directory (`~/.pi/agent/extensions/`). By default the plugin keeps its config (`datadog.json`) and OAuth tokens (`datadog-oauth/<domain>/`) under `~/.pi/agent/datadog/`, so your setup and sign-in follow you across every project — you configure and authorize once. The agent dir honors `PI_CODING_AGENT_DIR` if you've overridden it.
+`pi install npm:@datadog/pi-plugin` writes the package entry to Pi's global settings (`~/.pi/agent/settings.json`) and installs the npm package under Pi's package cache (`~/.pi/agent/npm/`). By default the plugin keeps its config (`datadog.json`) and OAuth tokens (`datadog-oauth/<domain>/`) under `~/.pi/agent/datadog/`, so your setup and sign-in follow you across every project — you configure and authorize once. The agent dir honors `PI_CODING_AGENT_DIR` if you've overridden it.
 
 If a single repo needs a different Datadog site than your global default, create a project override: run `ddsetup` with scope `project` (or place a `.pi/datadog.json` in the repo). When that file is present it wins for that directory, and `ddconfig`/`ddtoolsets` changes made there stay project-local. OAuth tokens remain global per domain regardless of scope, so a project override never forces a re-login.
 
