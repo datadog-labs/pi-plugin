@@ -13,7 +13,7 @@ import { createDatadogProxy } from './tools/proxy.js';
 import { makeUrlBuilder } from '#shared/url';
 
 // Build-time constants (replaced by bundle.ts — keep inside string literals)
-const PLUGIN_VERSION = '0.1.1';
+const PLUGIN_VERSION = '0.1.2';
 const PLUGIN_ID = 'pi-plugin';
 const MCP_NAME = 'datadog';
 const MCP_FILE = 'datadog.json';
