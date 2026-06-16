@@ -19,7 +19,7 @@
 // We decide once, at construction. To switch modes after startup, change env
 // vars and `/reload` inside Pi (which re-executes the entry file).
 
-import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool, CallToolResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -42,11 +42,14 @@ const buildApiKeyHeaders = (): Record<string, string> | undefined => {
 
 export const detectAuthMode = (): AuthMode => (buildApiKeyHeaders() ? 'apiKey' : 'oauth');
 
+export type McpCallToolArgs = Record<string, unknown> | undefined;
+
 export type McpClient = {
   readonly authMode: AuthMode;
   setUrl(url: string): void;
   listTools(): Promise<Tool[]>;
-  callTool(name: string, args: Record<string, unknown> | undefined): Promise<CallToolResult>;
+  readResource(uri: string): Promise<ReadResourceResult>;
+  callTool(name: string, args: McpCallToolArgs): Promise<CallToolResult>;
   close(): Promise<void>;
 };
 
@@ -194,6 +197,9 @@ export const createMcpClient = (oauthDir: string, initialUrl: string): McpClient
     async listTools() {
       const result = await withAuthRecovery((client) => client.listTools());
       return result.tools;
+    },
+    readResource(uri) {
+      return withAuthRecovery((client) => client.readResource({ uri }));
     },
     async callTool(name, args) {
       return (await withAuthRecovery((client) => client.callTool({ name, arguments: args ?? {} }))) as CallToolResult;

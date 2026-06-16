@@ -1,13 +1,25 @@
 // Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
-import { defineTool } from '@earendil-works/pi-coding-agent';
+import { type AgentToolResult, defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
 import { loadServerState, persistConfig } from '../config.js';
 import { SITE_TABLE, domainToSite, isKnownDomain, resolveSiteToDomain } from '#shared/site';
 import { lines } from '#shared/text';
-import type { ToolDeps, ToolResult } from './types.js';
+import { pickDatadogSite } from './tui.js';
+import type { ToolDeps } from './types.js';
+
+export type DdconfigDetails =
+  | { state: 'not-setup' }
+  | { state: 'status'; domain: string }
+  | { state: 'awaiting-site' }
+  | { state: 'bad-site' }
+  | { state: 'no-op' }
+  | { state: 'changed'; domain: string }
+  | { state: 'troubleshoot' };
+
+export type DdconfigResult = AgentToolResult<DdconfigDetails>;
 
 export const createDdconfig = ({ mcp, urls, mcpFile, cwd, globalDir }: ToolDeps) =>
   defineTool({
@@ -30,7 +42,8 @@ export const createDdconfig = ({ mcp, urls, mcpFile, cwd, globalDir }: ToolDeps)
         }),
       ),
     }),
-    async execute(_toolCallId, params): Promise<ToolResult> {
+    async execute(...args): Promise<DdconfigResult> {
+      const [, params, , , ctx] = args;
       const state = await loadServerState(cwd, globalDir, mcpFile);
       if (state.kind === 'not-setup') {
         return {
@@ -69,7 +82,8 @@ export const createDdconfig = ({ mcp, urls, mcpFile, cwd, globalDir }: ToolDeps)
       }
 
       if (action === 'change-site') {
-        if (!params.site) {
+        const site = params.site ?? (await pickDatadogSite(ctx, currentDomain));
+        if (!site) {
           return {
             content: [
               {
@@ -86,18 +100,13 @@ export const createDdconfig = ({ mcp, urls, mcpFile, cwd, globalDir }: ToolDeps)
           };
         }
 
-        const newDomain = resolveSiteToDomain(params.site);
+        const newDomain = resolveSiteToDomain(site);
         if (!newDomain) {
           return {
             content: [
               {
                 type: 'text',
-                text: lines(
-                  `Could not resolve "${params.site}" to a Datadog MCP domain.`,
-                  '',
-                  'Available sites:',
-                  SITE_TABLE,
-                ),
+                text: lines(`Could not resolve "${site}" to a Datadog MCP domain.`, '', 'Available sites:', SITE_TABLE),
               },
             ],
             details: { state: 'bad-site' },

@@ -1,13 +1,23 @@
 // Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
-import { defineTool } from '@earendil-works/pi-coding-agent';
+import { type AgentToolResult, defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
 import { type ConfigScope, loadScopeConfig, persistConfig } from '../config.js';
+import type { AuthMode } from '../mcp-client.js';
 import { SITE_TABLE, isKnownDomain, resolveSiteToDomain } from '#shared/site';
 import { lines } from '#shared/text';
-import type { ToolDeps, ToolResult } from './types.js';
+import { pickDatadogSite } from './tui.js';
+import type { ToolDeps } from './types.js';
+
+export type DdsetupDetails =
+  | { state: 'already-configured'; scope: ConfigScope }
+  | { state: 'awaiting-site' }
+  | { state: 'bad-site' }
+  | { state: 'configured'; domain: string; scope: ConfigScope; authMode: AuthMode };
+
+export type DdsetupResult = AgentToolResult<DdsetupDetails>;
 
 export const createDdsetup = ({ mcp, urls, mcpFile, mcpEnabledToolsets, cwd, globalDir }: ToolDeps) =>
   defineTool({
@@ -21,10 +31,12 @@ export const createDdsetup = ({ mcp, urls, mcpFile, mcpEnabledToolsets, cwd, glo
       'Setup is global by default (shared across all projects). Pass scope "project" only if the user explicitly wants this repo to use a different Datadog site than their global default.',
     ),
     parameters: Type.Object({
-      site: Type.String({
-        description:
-          'Datadog site code (us1, us3, us5, eu, ap1, ap2), a Datadog URL, or any MCP domain hostname provided by the user.',
-      }),
+      site: Type.Optional(
+        Type.String({
+          description:
+            'Datadog site code (us1, us3, us5, eu, ap1, ap2), a Datadog URL, or any MCP domain hostname provided by the user. In Pi TUI mode, omit this to show an interactive site picker.',
+        }),
+      ),
       scope: Type.Optional(
         Type.Union([Type.Literal('global'), Type.Literal('project')], {
           description:
@@ -32,7 +44,8 @@ export const createDdsetup = ({ mcp, urls, mcpFile, mcpEnabledToolsets, cwd, glo
         }),
       ),
     }),
-    async execute(_toolCallId, params): Promise<ToolResult> {
+    async execute(...args): Promise<DdsetupResult> {
+      const [, params, , , ctx] = args;
       const scope: ConfigScope = params.scope ?? 'global';
       const existing = await loadScopeConfig(cwd, globalDir, mcpFile, scope);
 
@@ -52,14 +65,22 @@ export const createDdsetup = ({ mcp, urls, mcpFile, mcpEnabledToolsets, cwd, glo
         };
       }
 
-      const domain = resolveSiteToDomain(params.site);
+      const site = params.site ?? (await pickDatadogSite(ctx));
+      if (!site) {
+        return {
+          content: [{ type: 'text', text: lines('Choose a Datadog site to configure the MCP server:', SITE_TABLE) }],
+          details: { state: 'awaiting-site' },
+        };
+      }
+
+      const domain = resolveSiteToDomain(site);
       if (!domain) {
         return {
           content: [
             {
               type: 'text',
               text: lines(
-                `Could not resolve "${params.site}" to a Datadog MCP domain.`,
+                `Could not resolve "${site}" to a Datadog MCP domain.`,
                 '',
                 'Available sites:',
                 SITE_TABLE,
