@@ -75,6 +75,8 @@ The plugin provides tools the agent can use to manage configuration:
 - `ddconfig` — change your Datadog site or view connection details
 - `ddtoolsets` — enable or disable groups of tools
 
+In Pi TUI mode, these tools can use interactive pickers: omit `site` when running `ddsetup` or `ddconfig` with `action: "change-site"` to choose from the known Datadog sites, and run `ddtoolsets` with `action: "configure"` to open the toolset picker. The picker also supports the `all` meta-toolset, which enables every generally available Datadog MCP toolset; preview toolsets still need to be selected explicitly.
+
 ## Advanced usage
 
 ### API key authentication (for headless / SSH / CI)
@@ -111,7 +113,7 @@ After updates (`pi install npm:@datadog/pi-plugin@latest` or local edits), run `
 
 ## Support
 
-- [Datadog MCP Server Documentation](https://docs.datadoghq.com/bits_ai/mcp_server/)
+- [Datadog MCP Server Documentation](https://docs.datadoghq.com/mcp_server/)
 - [Pi Documentation](https://pi.dev/docs)
 
 ## Legal

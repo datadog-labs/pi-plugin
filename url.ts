@@ -7,7 +7,7 @@
 // PLUGIN_ID / PLUGIN_VERSION constants (substituted by bundle.ts in the entry
 // file only). Everything downstream stays pure.
 
-const MCP_PATH = '/api/unstable/mcp-server/mcp';
+const MCP_PATH = '/v1/mcp';
 
 export type ParsedUrl = { domain: string; toolsets: string };
 
