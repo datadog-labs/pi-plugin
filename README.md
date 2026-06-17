@@ -11,10 +11,11 @@ Query your Datadog data directly from the [Pi coding agent](https://pi.dev/) usi
 
 ## Why this plugin looks different
 
-Pi does not have built-in MCP support — it is intentionally minimal. This plugin ships as a Pi **extension** that talks directly to the Datadog MCP server, using the official [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) for the wire protocol and OAuth. The extension registers four tools the agent can use:
+Pi does not have built-in MCP support — it is intentionally minimal. This plugin ships as a Pi **extension** that talks directly to the Datadog MCP server, using the official [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) for the wire protocol and OAuth. The extension registers:
 
 - `datadog` — proxy tool the agent uses to list and invoke Datadog MCP tools on demand (token-efficient: one tool definition regardless of how many Datadog tools exist server-side)
-- `ddsetup`, `ddconfig`, `ddtoolsets` — manage the connection (site, toolsets, troubleshooting)
+- `/datadog` — slash command for direct setup and configuration (`/datadog setup`, `/datadog configure`, `/datadog toolsets`)
+- `ddsetup`, `ddconfig`, `ddtoolsets` — model-callable management tools so the agent can recover automatically when setup is needed
 
 ## Getting started
 
@@ -32,13 +33,13 @@ This adds the package to Pi's global settings and installs the plugin plus its r
 pi
 ```
 
-**3. Configure your Datadog site** by asking any Datadog question — the agent will run `ddsetup` automatically — or invoke it directly:
+**3. Configure your Datadog site** by asking any Datadog question — the agent can run the `ddsetup` tool automatically — or invoke the slash command directly:
 
 ```
-Run the ddsetup tool with site us1
+/datadog setup us1
 ```
 
-**4. Sign in to Datadog** when the agent next calls the `datadog` tool. Your browser will open to the Datadog sign-in page; once you authorize, control returns to Pi and your tokens are cached globally at `~/.pi/agent/datadog/datadog-oauth/<domain>/`. The plugin creates that cache with owner-only permissions. Sign-in is shared across all your projects (per domain), so you authorize once. Subsequent calls reuse the cached tokens and refresh automatically when they expire.
+**4. Sign in to Datadog.** If you ran `/datadog setup`, your browser opens during setup. If setup happened automatically through the agent, the browser opens when the agent next calls the `datadog` tool. Once you authorize, control returns to Pi and your tokens are cached globally at `~/.pi/agent/datadog/datadog-oauth/<domain>/`. The plugin creates that cache with owner-only permissions. Sign-in is shared across all your projects (per domain), so you authorize once. Subsequent calls reuse the cached tokens and refresh automatically when they expire.
 
 ## Using the plugin
 
@@ -64,18 +65,21 @@ The agent will call the `datadog` tool with `{ "list": true }` first to discover
 
 ## Can't connect?
 
-**Never connected before?** Tell the agent to run `ddsetup`. It will configure the Datadog MCP domain globally at `~/.pi/agent/datadog/datadog.json`.
+**Never connected before?** Run `/datadog setup`. It will configure the Datadog MCP domain globally at `~/.pi/agent/datadog/datadog.json`.
 
-**Was working before but stopped?** Tell the agent to run `ddconfig` with the troubleshoot action. The most common cause is an expired sign-in — call the `datadog` tool with `{ "list": true }` to trigger a fresh sign-in flow.
+**Was working before but stopped?** Ask the agent to troubleshoot the Datadog connection. The most common cause is an expired sign-in — call the `datadog` tool with `{ "list": true }` to trigger a fresh sign-in flow.
 
 ## Changing settings
 
-The plugin provides tools the agent can use to manage configuration:
+The plugin provides a single `/datadog` slash command for direct configuration:
 
-- `ddconfig` — change your Datadog site or view connection details
-- `ddtoolsets` — enable or disable groups of tools
+- `/datadog setup` — configure your Datadog MCP site
+- `/datadog configure` — change your Datadog MCP site
+- `/datadog toolsets` — open the Datadog toolset picker
 
-In Pi TUI mode, these tools can use interactive pickers: omit `site` when running `ddsetup` or `ddconfig` with `action: "change-site"` to choose from the known Datadog sites, and run `ddtoolsets` with `action: "configure"` to open the toolset picker. The picker also supports the `all` meta-toolset, which enables every generally available Datadog MCP toolset; preview toolsets still need to be selected explicitly.
+In Pi TUI mode, omit the site when running `/datadog setup` or `/datadog configure` to choose from the known Datadog sites interactively. The toolset picker supports the `all` meta-toolset, which enables every generally available Datadog MCP toolset; preview toolsets still need to be selected explicitly.
+
+The same management flows remain available as model-callable tools (`ddsetup`, `ddconfig`, and `ddtoolsets`) so the agent can recover automatically when a Datadog request needs setup first.
 
 ## Advanced usage
 
@@ -89,7 +93,7 @@ export DD_APPLICATION_KEY=your-application-key
 pi
 ```
 
-When both are set, the plugin uses them as request headers and skips the OAuth flow entirely. Run `ddconfig` to see which auth mode is active in your current session.
+When both are set, the plugin uses them as request headers and skips the OAuth flow entirely. Ask the agent to check the Datadog config if you need to see which auth mode is active in your current session.
 
 ### Callback port
 
@@ -99,7 +103,7 @@ By default OAuth callbacks come back on `http://localhost:19876/callback`. Overr
 
 `pi install npm:@datadog/pi-plugin` writes the package entry to Pi's global settings (`~/.pi/agent/settings.json`) and installs the npm package under Pi's package cache (`~/.pi/agent/npm/`). By default the plugin keeps its config (`datadog.json`) and OAuth tokens (`datadog-oauth/<domain>/`) under `~/.pi/agent/datadog/`, so your setup and sign-in follow you across every project — you configure and authorize once. The agent dir honors `PI_CODING_AGENT_DIR` if you've overridden it.
 
-If a single repo needs a different Datadog site than your global default, create a project override: run `ddsetup` with scope `project` (or place a `.pi/datadog.json` in the repo). When that file is present it wins for that directory, and `ddconfig`/`ddtoolsets` changes made there stay project-local. OAuth tokens remain global per domain regardless of scope, so a project override never forces a re-login.
+If a single repo needs a different Datadog site than your global default, create a project override: run `/datadog setup --project` (or place a `.pi/datadog.json` in the repo). When that file is present it wins for that directory. OAuth tokens remain global per domain regardless of scope, so a project override never forces a re-login.
 
 ### Reloading after changes
 
