@@ -3,6 +3,7 @@
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
+import { registerDatadogCommands } from './commands.js';
 import { loadServerState } from './config.js';
 import { createMcpClient } from './mcp-client.js';
 import { globalDatadogDir, resolveAgentDir } from './paths.js';
@@ -13,7 +14,7 @@ import { createDatadogProxy } from './tools/proxy.js';
 import { makeUrlBuilder } from '#shared/url';
 
 // Build-time constants (replaced by bundle.ts — keep inside string literals)
-const PLUGIN_VERSION = '0.1.3';
+const PLUGIN_VERSION = '0.1.4';
 const PLUGIN_ID = 'pi-plugin';
 const MCP_NAME = 'datadog';
 const MCP_FILE = 'datadog.json';
@@ -49,4 +50,5 @@ export default async function activate(pi: ExtensionAPI): Promise<void> {
   pi.registerTool(createDdsetup(deps));
   pi.registerTool(createDdconfig(deps));
   pi.registerTool(createDdtoolsets(deps));
+  registerDatadogCommands(pi, deps);
 }
