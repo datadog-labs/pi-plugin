@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
-import { defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { defineTool, keyHint, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Box, Container, Text } from '@earendil-works/pi-tui';
 
 import { loadServerState } from '../config.js';
@@ -78,6 +78,20 @@ export const createDatadogProxy = (
         return 'toolSuccessBg';
       })();
       const box = new Box(1, 1, (s) => theme.bg(bgKey, s));
+      if (details.state === 'listed' && !options.expanded) {
+        const query = details.query?.trim();
+        const summary = query
+          ? `Found ${String(details.count)} of ${String(details.total)} Datadog tools matching "${query}"`
+          : `Available Datadog tools: ${String(details.count)}`;
+        box.addChild(
+          new Text(
+            theme.fg('toolOutput', `${summary} (${keyHint('app.tools.expand', 'to expand')})`),
+            0,
+            0,
+          ),
+        );
+        return box;
+      }
       const textBlocks = result.content.filter((c) => c.type === 'text');
       const output = textBlocks.map((c) => c.text.replace(/\r/g, '')).join('\n');
       if (output) {
