@@ -125,7 +125,7 @@ export const createDdsetup = (deps: ToolDeps) =>
     description: lines(
       'Set up the Datadog MCP server for the first time.',
       'Run this when Datadog tools are not available or the MCP server has not been configured.',
-      'Accepts a Datadog site code (us1, us3, us5, eu, ap1, ap2), a Datadog URL, or any MCP domain hostname.',
+      'Accepts a Datadog site code (us1, us3, us5, eu, ap1, ap2, uk1), a Datadog URL, or any MCP domain hostname.',
       "If the user's Datadog site is not in the standard list, ask them for the MCP domain to use.",
       'Setup is global by default (shared across all projects). Pass scope "project" only if the user explicitly wants this repo to use a different Datadog site than their global default.',
     ),
@@ -133,7 +133,7 @@ export const createDdsetup = (deps: ToolDeps) =>
       site: Type.Optional(
         Type.String({
           description:
-            'Datadog site code (us1, us3, us5, eu, ap1, ap2), a Datadog URL, or any MCP domain hostname provided by the user. In Pi TUI mode, omit this to show an interactive site picker.',
+            'Datadog site code (us1, us3, us5, eu, ap1, ap2, uk1), a Datadog URL, or any MCP domain hostname provided by the user. In Pi TUI mode, omit this to show an interactive site picker.',
         }),
       ),
       scope: Type.Optional(

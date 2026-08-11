@@ -11,10 +11,12 @@ import { createDdconfig } from './tools/ddconfig.js';
 import { createDdsetup } from './tools/ddsetup.js';
 import { createDdtoolsets } from './tools/ddtoolsets.js';
 import { createDatadogProxy } from './tools/proxy.js';
+import { initVizRuntime } from './viz/index.js';
+
 import { makeUrlBuilder } from '#shared/url';
 
 // Build-time constants (replaced by bundle.ts — keep inside string literals)
-const PLUGIN_VERSION = '0.1.4';
+const PLUGIN_VERSION = '0.7.15';
 const PLUGIN_ID = 'pi-plugin';
 const MCP_NAME = 'datadog';
 const MCP_FILE = 'datadog.json';
@@ -23,6 +25,7 @@ const MCP_ENABLED_TOOLSETS = 'core,visualizations';
 export default async function activate(pi: ExtensionAPI): Promise<void> {
   const urls = makeUrlBuilder({ clientId: PLUGIN_ID, version: PLUGIN_VERSION });
   const cwd = process.cwd();
+
   // Global state dir (config default + OAuth tokens) follows the user across
   // projects; an optional <cwd>/.pi/<mcpFile> can still override per repo.
   const globalDir = globalDatadogDir(resolveAgentDir());
@@ -46,7 +49,10 @@ export default async function activate(pi: ExtensionAPI): Promise<void> {
     globalDir,
   };
 
-  pi.registerTool(createDatadogProxy(deps));
+  const vizOverrides = initVizRuntime(pi, mcp) || {};
+  const proxy = createDatadogProxy(deps, vizOverrides);
+
+  pi.registerTool(proxy);
   pi.registerTool(createDdsetup(deps));
   pi.registerTool(createDdconfig(deps));
   pi.registerTool(createDdtoolsets(deps));
