@@ -78,6 +78,23 @@ export const createDatadogProxy = (
         return 'toolSuccessBg';
       })();
       const box = new Box(1, 1, (s) => theme.bg(bgKey, s));
+
+      // Compact catalog view for tool listing
+      if (details.state === 'listed' && !options.expanded) {
+        const query = (details.query ?? '').trim();
+        const header = query
+          ? `Datadog tools matching "${query}" (${String(details.count)} of ${String(details.total)})`
+          : `Datadog tools (${String(details.count)})`;
+        box.addChild(new Text(theme.fg('toolTitle', theme.bold(header)), 0, 0));
+        if (details.tools.length === 0) {
+          box.addChild(new Text(theme.fg('dim', 'No matches. Broaden the query or list all tools.'), 0, 0));
+        } else {
+          const names = details.tools.map((t) => t.name).join(', ');
+          box.addChild(new Text(theme.fg('muted', names), 0, 0));
+        }
+        return box;
+      }
+
       const textBlocks = result.content.filter((c) => c.type === 'text');
       const output = textBlocks.map((c) => c.text.replace(/\r/g, '')).join('\n');
       if (output) {

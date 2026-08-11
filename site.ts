@@ -10,6 +10,7 @@ export const SITE_TO_DOMAIN = new Map([
   ['eu', 'mcp.datadoghq.eu'],
   ['ap1', 'mcp.ap1.datadoghq.com'],
   ['ap2', 'mcp.ap2.datadoghq.com'],
+  ['uk1', 'mcp.uk1.datadoghq.com'],
 ]);
 
 export const SITE_TABLE = [
@@ -49,8 +50,8 @@ export const resolveSiteToDomain = (input: string): string | undefined => {
       return undefined;
     }
     // Specific-subdomain sites first — us1/eu are broad suffixes that would
-    // swallow us3/us5/ap1/ap2 hosts if checked via the same endsWith rule.
-    for (const code of ['us3', 'us5', 'ap1', 'ap2']) {
+    // swallow us3/us5/ap1/ap2/uk1 hosts if checked via the same endsWith rule.
+    for (const code of ['us3', 'us5', 'ap1', 'ap2', 'uk1']) {
       const domain = SITE_TO_DOMAIN.get(code);
       if (domain && host.endsWith(domain.replace(/^mcp\./, ''))) return domain;
     }

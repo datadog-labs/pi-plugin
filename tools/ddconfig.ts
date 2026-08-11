@@ -176,7 +176,7 @@ export const createDdconfig = (deps: ToolDeps) =>
       site: Type.Optional(
         Type.String({
           description:
-            'New Datadog site code (us1, us3, us5, eu, ap1, ap2), a Datadog URL, or any MCP domain hostname (for change-site action).',
+            'New Datadog site code (us1, us3, us5, eu, ap1, ap2, uk1), a Datadog URL, or any MCP domain hostname (for change-site action).',
         }),
       ),
     }),

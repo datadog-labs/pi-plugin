@@ -1,7 +1,7 @@
 {
   "name": "@datadog/pi-plugin",
-  "version": "0.1.4",
-  "description": "Use Datadog directly in the Pi coding agent through a preconfigured Datadog MCP server. Query logs, metrics, traces, dashboards, and more through natural conversation. This plugin is in preview.",
+  "version": "0.7.15",
+  "description": "Use Datadog directly in the Pi coding agent through a preconfigured Datadog MCP server. Query logs, metrics, traces, dashboards, and more through natural conversation.",
   "main": "datadog.ts",
   "type": "module",
   "author": "Datadog",
@@ -25,6 +25,7 @@
   "files": [
     "*.ts",
     "tools/",
+    "viz/",
     "NOTICE",
     "LICENSE-3rdparty.csv"
   ],
@@ -42,10 +43,14 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
       "optional": true
     },
     "typebox": {

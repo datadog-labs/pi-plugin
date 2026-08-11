@@ -1,5 +1,3 @@
-**This plugin is currently in Preview.**
-
 # Datadog Pi Plugin
 
 Query your Datadog data directly from the [Pi coding agent](https://pi.dev/) using natural language. Ask about logs, metrics, traces, dashboards, monitors, and more.
@@ -46,7 +44,7 @@ pi
 Just ask the agent anything about your Datadog data:
 
 ```
-Show me error logs from the last hour
+Show me error logs for the "checkout" service from the last hour
 ```
 
 ```

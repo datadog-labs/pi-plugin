@@ -26,6 +26,7 @@ import {
   toolsetSearchText,
   type ToolsetCatalogEntry,
 } from '../toolsets.js';
+import { checkActivation as vizCheckActivation } from '../viz/compat.js';
 import { SITE_TO_DOMAIN, domainToSite } from '#shared/site';
 import { parseToolsetList } from '#shared/text';
 
@@ -314,7 +315,11 @@ class ToolsetPicker implements Component, Focusable {
     if (row.kind === 'defaults' || row.kind === 'all') return row.description;
     const defaultNote = row.entry.isDefault ? ' Default toolset.' : '';
     const previewNote = row.entry.isPreview ? ' Preview toolset; access may require enablement.' : '';
-    return `${row.description}${defaultNote}${previewNote}`;
+    const piSpecificNote =
+      row.entry.name === 'visualizations' && vizCheckActivation().ok
+        ? ' - Adds an interactive chart panel and inline screenshots in the terminal.'
+        : '';
+    return `${row.description}${piSpecificNote}${defaultNote}${previewNote}`;
   }
 
   private toggleSelectedRow(): void {
