@@ -3,3 +3,4 @@ Component,Origin,License,Copyright
 @modelcontextprotocol/sdk,https://www.npmjs.com/package/@modelcontextprotocol/sdk,MIT,Anthropic PBC
 open,https://www.npmjs.com/package/open,MIT,Sindre Sorhus
 typebox,https://www.npmjs.com/package/typebox,MIT,Haydn Paterson
+proper-lockfile,https://www.npmjs.com/package/proper-lockfile,MIT,IndigoUnited

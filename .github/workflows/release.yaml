@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Extract version
         id: version
@@ -52,29 +52,35 @@ jobs:
       - name: Check if release already exists
         id: check
         run: |
-          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+          TAG="${{ steps.version.outputs.tag }}"
+          # Match on tag_name explicitly (not `gh release view`) so this also
+          # catches draft releases, which have a tag_name but no git tag ref
+          # yet — otherwise every push before the draft is published would
+          # create a duplicate draft for the same version.
+          MATCH=$(gh api "repos/${{ github.repository }}/releases?per_page=100" --paginate \
+            --jq '[.[] | select(.tag_name == env.TAG)] | length')
+          if [ "$MATCH" -gt 0 ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release ${{ steps.version.outputs.tag }} already exists, skipping"
+            echo "Release ${TAG} already exists (or is already drafted), skipping"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
 
-      - name: Create release
+      - name: Create draft release
         if: steps.check.outputs.exists == 'false'
         run: |
-          # --target pins the new tag to the commit that triggered this
-          # workflow. Without it, `gh release create` would create the
-          # missing tag on the repo's default branch (main), which would
-          # make a preview-branch release point at main instead of the
-          # preview commit — and break the downstream npm-publish step
-          # for OpenCode previews, since it derives the dist-tag from the
-          # tagged commit's package.json.
-          ARGS="--title ${{ steps.version.outputs.tag }} --generate-notes --target ${{ github.sha }}"
+          # Org policy blocks Actions from creating/pushing tags directly, so
+          # we create a draft release instead. GitHub doesn't create the git
+          # tag ref until a human publishes the draft, which is done under
+          # their own (bypass-exempt) identity rather than github-actions[bot].
+          TAG="${{ steps.version.outputs.tag }}"
+          ARGS="--title ${TAG} --generate-notes --draft --target ${{ github.sha }}"
           if [ "${{ steps.version.outputs.is_prerelease }}" = "true" ]; then
             ARGS="$ARGS --prerelease"
           fi
-          gh release create "${{ steps.version.outputs.tag }}" $ARGS
+          gh release create "${TAG}" $ARGS
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

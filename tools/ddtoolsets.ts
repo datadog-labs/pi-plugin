@@ -4,7 +4,7 @@
 import { type AgentToolResult, defineTool, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
-import { loadServerState, persistConfig } from '../config.js';
+import { profileLabel } from '../config.js';
 import { readToolsetCatalog } from '../toolsets.js';
 import { formatToolsetList, lines, parseToolsetList } from '#shared/text';
 import { pickToolsets } from './tui.js';
@@ -69,19 +69,19 @@ const computeNewToolsets = (
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 export const runDdtoolsets = async (
-  { mcp, urls, mcpFile, cwd, globalDir }: ToolDeps,
+  { connections }: ToolDeps,
   params: DdtoolsetsParams,
   ctx: ExtensionContext,
 ): Promise<DdtoolsetsResult> => {
-  const state = await loadServerState(cwd, globalDir, mcpFile);
-  if (state.kind === 'not-setup') {
+  const selected = await connections.current();
+  if (!selected) {
     return {
-      content: [{ type: 'text', text: 'The Datadog MCP server has not been set up. Use ddsetup first.' }],
+      content: [{ type: 'text', text: 'The Datadog MCP server has not been set up. Open /datadog to connect.' }],
       details: { state: 'not-setup' },
     };
   }
 
-  const current = parseToolsetList(state.config.toolsets);
+  const current = parseToolsetList(selected.toolsets);
   const action: ToolsetAction = params.action ?? 'list';
 
   if (action === 'configure') {
@@ -103,7 +103,8 @@ export const runDdtoolsets = async (
 
     let catalog;
     try {
-      catalog = await readToolsetCatalog(mcp);
+      const { client } = await connections.connection(ctx.signal);
+      catalog = await readToolsetCatalog(client);
     } catch (error) {
       return {
         content: [
@@ -112,7 +113,7 @@ export const runDdtoolsets = async (
             text: lines(
               `Failed to load Datadog MCP toolsets: ${errorMessage(error)}`,
               '',
-              'The server may be configured but not responding. Use ddconfig with action "troubleshoot" to diagnose issues.',
+              'The server may be configured but not responding. Use ddconfig with action "check" to diagnose issues. Open /datadog if sign-in is required.',
             ),
           },
         ],
@@ -120,7 +121,7 @@ export const runDdtoolsets = async (
       };
     }
 
-    const nextToolsets = await pickToolsets(ctx, catalog, state.config.toolsets);
+    const nextToolsets = await pickToolsets(ctx, catalog, selected.toolsets);
     if (nextToolsets === undefined || nextToolsets === null) {
       return {
         content: [{ type: 'text', text: 'Toolset configuration unchanged.' }],
@@ -128,9 +129,7 @@ export const runDdtoolsets = async (
       };
     }
 
-    const newConfig = { ...state.config, toolsets: nextToolsets };
-    await persistConfig(cwd, globalDir, mcpFile, state.scope, newConfig);
-    mcp.setUrl(urls.build(state.config.domain, nextToolsets));
+    await connections.setToolsets(selected, nextToolsets);
     const next = parseToolsetList(nextToolsets);
 
     return {
@@ -154,7 +153,7 @@ export const runDdtoolsets = async (
         {
           type: 'text',
           text: lines(
-            'Current Datadog MCP toolsets:',
+            `Datadog toolsets for ${profileLabel(selected.profile)} (${selected.scope}):`,
             current.length > 0 ? `  Enabled: ${current.join(', ')}` : '  Using server defaults',
             '',
             'Available actions:',
@@ -176,11 +175,7 @@ export const runDdtoolsets = async (
   }
 
   const newToolsets = next.join(',');
-  const newConfig = { ...state.config, toolsets: newToolsets };
-  // Write back to the scope we resolved from, so a project override stays
-  // project-local and a global config stays global.
-  await persistConfig(cwd, globalDir, mcpFile, state.scope, newConfig);
-  mcp.setUrl(urls.build(state.config.domain, newToolsets));
+  await connections.setToolsets(selected, newToolsets);
 
   const label =
     action === 'reset' ? 'Toolsets reset to server defaults.' : `Toolsets updated: ${formatToolsetList(next)}`;

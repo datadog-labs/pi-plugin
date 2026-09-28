@@ -4,13 +4,12 @@
 import { defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Box, Container, Text } from '@earendil-works/pi-tui';
 
-import { loadServerState } from '../config.js';
+import { profileLabel } from '../config.js';
+import { errorMessage } from '../connection-errors.js';
 import { lines } from '#shared/text';
 
 import { proxyParameters } from './types.js';
 import type { ProxyDetails, ProxyToolResult, SubtoolConfig, ToolDeps } from './types.js';
-
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 // Optional per-tool overrides, keyed by upstream Datadog tool name. Partial so a
 // missing key is typed as `undefined` (only some tools have overrides).
@@ -26,7 +25,7 @@ export type SubtoolOverrides = Partial<Record<string, SubtoolConfig>>;
 // Subtool overrides are supplied up front (immutable) rather than registered
 // after construction, so the set of overrides is fixed for the tool's lifetime.
 export const createDatadogProxy = (
-  { mcp, mcpFile, cwd, globalDir }: ToolDeps,
+  { connections }: ToolDeps,
   subtools: SubtoolOverrides = {},
 ): ToolDefinition<typeof proxyParameters, ProxyDetails> =>
   defineTool<typeof proxyParameters, ProxyDetails>({
@@ -37,7 +36,7 @@ export const createDatadogProxy = (
       'Always call this tool first to discover available Datadog tools — use { "list": true } for the full catalog,',
       'or { "query": "<keywords>" } to narrow when intent is clear (e.g. "logs", "monitor alert"). If a narrow query',
       'returns no useful matches, broaden it or call again with no query. Then invoke a tool with',
-      '{ "tool": "<name>", "args": { ... } }. If this returns a not-setup error, ask the user to run the ddsetup tool.',
+      '{ "tool": "<name>", "args": { ... } }. If this returns a not-setup error, ask the user to open /datadog to connect.',
     ),
     parameters: proxyParameters,
     renderShell: 'self',
@@ -79,6 +78,9 @@ export const createDatadogProxy = (
       })();
       const box = new Box(1, 1, (s) => theme.bg(bgKey, s));
 
+      if (details.profile)
+        box.addChild(new Text(theme.fg('muted', `${details.profile.label} · ${details.profile.domain}`), 0, 0));
+
       // Compact catalog view for tool listing
       if (details.state === 'listed' && !options.expanded) {
         const query = (details.query ?? '').trim();
@@ -103,96 +105,105 @@ export const createDatadogProxy = (
       return box;
     },
     async execute(toolCallId, params, signal, onUpdate, ctx): Promise<ProxyToolResult> {
-      const state = await loadServerState(cwd, globalDir, mcpFile);
-      if (state.kind === 'not-setup') {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: 'The Datadog MCP server has not been set up yet. Ask the user to run the ddsetup tool to configure a Datadog site.',
-            },
-          ],
-          details: { state: 'not-setup' },
-        };
-      }
-
-      if (params.list || params.query !== undefined || (!params.tool && !params.args)) {
-        try {
-          const tools = await mcp.listTools();
-          const toolCatalog = tools.map((t) => ({
-            name: t.name,
-            description: t.description ?? '',
-            inputSchema: t.inputSchema,
-          }));
-          const terms = (params.query ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
-          const matched =
-            terms.length === 0
-              ? toolCatalog
-              : toolCatalog.filter((t) => {
-                  const haystack = `${t.name}\n${t.description}`.toLowerCase();
-                  return terms.every((term) => haystack.includes(term));
-                });
-          const header =
-            terms.length === 0
-              ? `Available Datadog tools (${String(tools.length)}):`
-              : `Datadog tools matching "${params.query ?? ''}" (${String(matched.length)} of ${String(tools.length)}):`;
-          const followUp =
-            matched.length === 0
-              ? 'No tools matched. Broaden the query or call again with no query to see the full catalog.'
-              : 'Call the datadog tool again with { "tool": "<name>", "args": { ... } } to invoke one.';
-          return {
-            content: [{ type: 'text', text: lines(header, JSON.stringify(matched, undefined, 2), '', followUp) }],
-            details: {
-              state: 'listed',
-              count: matched.length,
-              total: tools.length,
-              query: params.query,
-              tools: matched,
-            },
-          };
-        } catch (error) {
-          return {
-            content: [{ type: 'text', text: `Failed to list Datadog tools: ${errorMessage(error)}` }],
-            details: { state: 'error' },
-          };
-        }
-      }
-
-      if (!params.tool) {
-        return {
-          content: [
-            { type: 'text', text: 'Provide either { "list": true } or { "tool": "<name>", "args": { ... } }.' },
-          ],
-          details: { state: 'bad-input' },
-        };
-      }
-
       try {
-        // Custom executor if override
-        const executor = subtools[params.tool]?.execute;
-        if (executor) {
-          return await executor(toolCallId, params, signal, onUpdate, ctx, mcp);
-        }
+        const connection = await connections.connection(signal);
+        const { client: mcp, profile, identity } = connection;
+        const outcome = await (async (): Promise<ProxyToolResult> => {
+          if (params.list || params.query !== undefined || (!params.tool && !params.args)) {
+            try {
+              const tools = await mcp.listTools(signal);
+              const toolCatalog = tools.map((t) => ({
+                name: t.name,
+                description: t.description ?? '',
+                inputSchema: t.inputSchema,
+              }));
+              const terms = (params.query ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+              const matched =
+                terms.length === 0
+                  ? toolCatalog
+                  : toolCatalog.filter((t) => {
+                      const haystack = `${t.name}\n${t.description}`.toLowerCase();
+                      return terms.every((term) => haystack.includes(term));
+                    });
+              const header =
+                terms.length === 0
+                  ? `Available Datadog tools (${String(tools.length)}):`
+                  : `Datadog tools matching "${params.query ?? ''}" (${String(matched.length)} of ${String(tools.length)}):`;
+              const followUp =
+                matched.length === 0
+                  ? 'No tools matched. Broaden the query or call again with no query to see the full catalog.'
+                  : 'Call the datadog tool again with { "tool": "<name>", "args": { ... } } to invoke one.';
+              return {
+                content: [{ type: 'text', text: lines(header, JSON.stringify(matched, undefined, 2), '', followUp) }],
+                details: {
+                  state: 'listed',
+                  count: matched.length,
+                  total: tools.length,
+                  query: params.query,
+                  tools: matched,
+                },
+              };
+            } catch (error) {
+              return {
+                content: [{ type: 'text', text: `Failed to list Datadog tools: ${errorMessage(error)}` }],
+                details: { state: 'error' },
+              };
+            }
+          }
 
-        const result = await mcp.callTool(params.tool, params.args);
-        // SDK's CallToolResult.content is always an array. Concatenate text
-        // blocks for readable output; fall back to JSON for non-text content
-        // (images, embedded resources) so nothing is silently dropped.
-        const text = result.content.map((c) => (c.type === 'text' ? c.text : JSON.stringify(c))).join('\n');
+          if (!params.tool) {
+            return {
+              content: [
+                { type: 'text', text: 'Provide either { "list": true } or { "tool": "<name>", "args": { ... } }.' },
+              ],
+              details: { state: 'bad-input' },
+            };
+          }
+
+          try {
+            // Custom executor if override
+            const executor = subtools[params.tool]?.execute;
+            if (executor) {
+              return await executor(toolCallId, params, signal, onUpdate, ctx, mcp);
+            }
+
+            const result = await mcp.callTool(params.tool, params.args, signal);
+            // SDK's CallToolResult.content is always an array. Concatenate text
+            // blocks for readable output; fall back to JSON for non-text content
+            // (images, embedded resources) so nothing is silently dropped.
+            const text = result.content.map((c) => (c.type === 'text' ? c.text : JSON.stringify(c))).join('\n');
+            return {
+              content: [{ type: 'text', text }],
+              details: {
+                state: 'called',
+                tool: params.tool,
+                isError: result.isError ?? false,
+                structuredContent: result.structuredContent,
+              },
+            };
+          } catch (error) {
+            return {
+              content: [{ type: 'text', text: `Datadog tool "${params.tool}" failed: ${errorMessage(error)}` }],
+              details: { state: 'error', tool: params.tool },
+            };
+          }
+        })();
+        const target = {
+          id: profile.id,
+          label: profileLabel(profile),
+          domain: profile.domain,
+          orgUuid: identity.orgUuid,
+        };
         return {
-          content: [{ type: 'text', text }],
-          details: {
-            state: 'called',
-            tool: params.tool,
-            isError: result.isError ?? false,
-            structuredContent: result.structuredContent,
-          },
+          ...outcome,
+          content: [
+            { type: 'text', text: `Datadog organization: ${target.label} (${target.orgUuid}) · ${target.domain}` },
+            ...outcome.content,
+          ],
+          details: { ...outcome.details, profile: target },
         };
       } catch (error) {
-        return {
-          content: [{ type: 'text', text: `Datadog tool "${params.tool}" failed: ${errorMessage(error)}` }],
-          details: { state: 'error', tool: params.tool },
-        };
+        return { content: [{ type: 'text', text: errorMessage(error) }], details: { state: 'error' } };
       }
     },
   });

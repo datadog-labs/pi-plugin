@@ -1,100 +1,111 @@
 // Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
-// One-shot localhost HTTP server that catches the OAuth authorization-code
-// redirect from the Datadog auth server. Started lazily by oauth-provider.ts
-// when redirectToAuthorization is called; shuts itself down on the first valid
-// /callback hit (or on the timeout fallback).
-//
-// The default port (19876) matches pi-mcp-adapter so users with both extensions
-// don't fight over the same port range. Override via DD_OAUTH_CALLBACK_PORT.
+import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
+import open from 'open';
+import type { AuthorizationAttempt } from './oauth-provider.js';
 
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-
-export const CALLBACK_PATH = '/callback';
-export const DEFAULT_PORT = 19876;
-const TIMEOUT_MS = 5 * 60 * 1000;
-
-export type CallbackResult = { code: string; state: string | undefined };
-
-const getPort = (): number => {
+export type LoginCallback = AuthorizationAttempt & { code: Promise<string>; close(): Promise<void> };
+export const callbackPort = (): number => {
   const raw = process.env.DD_OAUTH_CALLBACK_PORT;
-  if (!raw) return DEFAULT_PORT;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : DEFAULT_PORT;
+  const port = raw === undefined ? 19876 : Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid DD_OAUTH_CALLBACK_PORT.');
+  return port;
 };
 
-export const callbackUrl = (): string => `http://localhost:${String(getPort())}${CALLBACK_PATH}`;
-
-const successHtml = (provider: string): string => `<!doctype html>
-<html><head><meta charset="utf-8"><title>${provider} sign-in complete</title>
-<style>body{font-family:system-ui;text-align:center;padding:4rem;color:#222}</style></head>
-<body><h1>Signed in to ${provider}</h1><p>You can close this tab and return to your terminal.</p></body></html>`;
-
-const escapeHtml = (text: string): string =>
-  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-const errorHtml = (message: string): string => `<!doctype html>
-<html><head><meta charset="utf-8"><title>Sign-in failed</title>
-<style>body{font-family:system-ui;text-align:center;padding:4rem;color:#222}code{color:#a00}</style></head>
-<body><h1>Sign-in failed</h1><p><code>${escapeHtml(message)}</code></p>
-<p>Return to your terminal and try again.</p></body></html>`;
-
-// Resolves with the auth code on the first valid /callback hit. Server shuts
-// down regardless of outcome (success, error, or timeout) so the port frees
-// up promptly.
-export const awaitCallback = (expectedState: string | undefined): Promise<CallbackResult> =>
-  new Promise<CallbackResult>((resolve, reject) => {
-    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-      const url = new URL(req.url ?? '/', `http://localhost:${String(getPort())}`);
-      if (url.pathname !== CALLBACK_PATH) {
-        res.writeHead(404).end();
-        return;
-      }
-
-      const error = url.searchParams.get('error');
-      if (error) {
-        const desc = url.searchParams.get('error_description') ?? error;
-        res.writeHead(400, { 'Content-Type': 'text/html' }).end(errorHtml(desc));
-        server.close();
-        reject(new Error(`OAuth provider returned error: ${desc}`));
-        return;
-      }
-
-      const code = url.searchParams.get('code');
-      const state = url.searchParams.get('state') ?? undefined;
-      if (!code) {
-        res.writeHead(400, { 'Content-Type': 'text/html' }).end(errorHtml('missing code parameter'));
-        server.close();
-        reject(new Error('OAuth callback missing code parameter'));
-        return;
-      }
-      if (expectedState !== undefined && state !== expectedState) {
-        res.writeHead(400, { 'Content-Type': 'text/html' }).end(errorHtml('state mismatch'));
-        server.close();
-        reject(new Error('OAuth callback state did not match — possible CSRF, aborting'));
-        return;
-      }
-
-      res.writeHead(200, { 'Content-Type': 'text/html' }).end(successHtml('Datadog'));
-      server.close();
-      resolve({ code, state });
-    });
-
-    const timer = setTimeout(() => {
-      server.close();
-      reject(new Error(`OAuth callback timed out after ${String(TIMEOUT_MS / 1000)}s. Try again.`));
-    }, TIMEOUT_MS);
-    timer.unref();
-
-    server.once('close', () => {
-      clearTimeout(timer);
-    });
-
-    server.on('error', (err) => {
-      clearTimeout(timer);
-      reject(new Error(`OAuth callback server failed: ${err.message}`));
-    });
-
-    server.listen(getPort(), '127.0.0.1');
+// Bind before opening a browser, and own all resources for exactly one attempt.
+// A port collision fails here, without creating an orphan browser login.
+export const startLoginCallback = async (
+  signal?: AbortSignal,
+  port = callbackPort(),
+  openBrowser: (url: string) => Promise<unknown> = open,
+): Promise<LoginCallback> => {
+  signal?.throwIfAborted();
+  const cancellation = new AbortController();
+  signal = AbortSignal.any([cancellation.signal, ...(signal ? [signal] : [])]);
+  let timedOut = false;
+  const state = randomBytes(32).toString('hex');
+  let resolveCode!: (code: string) => void;
+  let rejectCode!: (error: Error) => void;
+  const code = new Promise<string>((resolve, reject) => {
+    resolveCode = resolve;
+    rejectCode = reject;
   });
+  // The browser might fail or the attempt might abort before anyone awaits code.
+  void code.catch(() => undefined);
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    if (req.method !== 'GET' || url.pathname !== '/callback') {
+      res.writeHead(404).end();
+      return;
+    }
+    if (url.searchParams.get('state') !== state) {
+      res.writeHead(400).end('Invalid OAuth state.');
+      return;
+    }
+    if (url.searchParams.has('error')) {
+      res.writeHead(400).end('Datadog sign-in was not completed. Return to Pi.');
+      rejectCode(new Error('Datadog authorization was declined.'));
+      return;
+    }
+    const value = url.searchParams.get('code');
+    if (!value) {
+      res.writeHead(400).end('Missing authorization code.');
+      return;
+    }
+    res
+      .writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' })
+      .end('Authorization received. Return to Pi to finish verifying your organization.');
+    resolveCode(value);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      resolve();
+    });
+  });
+  // Port 0 is useful for isolated tests; production uses the configured fixed port.
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Datadog callback did not bind.');
+  const abort = () => {
+    rejectCode(
+      new Error(timedOut ? 'Datadog sign-in timed out. Open /datadog to try again.' : 'Datadog sign-in cancelled.'),
+    );
+    server.closeAllConnections();
+    server.close();
+  };
+  signal.addEventListener('abort', abort, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    cancellation.abort();
+  }, 5 * 60_000);
+  timeout.unref();
+  server.on('error', rejectCode);
+  if (signal.aborted) abort();
+  return {
+    state,
+    signal,
+    code,
+    redirectUrl: `http://localhost:${address.port}/callback`,
+    async open(url) {
+      signal.throwIfAborted();
+      await openBrowser(url.toString());
+    },
+    async close() {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', abort);
+      cancellation.abort();
+      rejectCode(new Error('Datadog login attempt closed.'));
+      server.closeAllConnections();
+      if (server.listening)
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => {
+            if (error) reject(error);
+            else resolve();
+          }),
+        );
+    },
+  };
+};

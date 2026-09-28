@@ -11,24 +11,9 @@ import type {
   ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { UrlBuilder } from '#shared/url';
+import type { Connections } from '../connections.js';
 
-// Shared dependency record the entry file builds once and hands to each tool
-// factory. Lives in `tools/` (not at the package root) so the entry module
-// never imports from here — avoids an import cycle. Mirrors the convention
-// used by plugins/opencode/tools/types.ts.
-export type ToolDeps = {
-  mcp: McpClient;
-  urls: UrlBuilder;
-  mcpName: string;
-  mcpFile: string;
-  mcpEnabledToolsets: string;
-  // Current working directory — the project-override config lives at <cwd>/.pi/.
-  cwd: string;
-  // Global Datadog state dir (<agentDir>/datadog) — the default config and all
-  // OAuth tokens live here so setup survives changing directories.
-  globalDir: string;
-};
+export type ToolDeps = { connections: Connections };
 
 export interface ProxyToolCatalogEntry {
   name: string;
@@ -48,7 +33,7 @@ export const proxyParameters = Type.Object({
   args: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: 'Arguments object for the tool.' })),
 });
 
-export type ProxyDetails =
+export type ProxyDetails = { profile?: { id: string; label: string; domain: string; orgUuid: string } } & (
   | { state: 'not-setup' }
   | { state: 'bad-input' }
   | { state: 'listed'; count: number; total: number; query?: string; tools: ProxyToolCatalogEntry[] }
@@ -60,7 +45,8 @@ export type ProxyDetails =
       structuredContent?: CallToolResult['structuredContent'];
       // Free-form, subtool-owned render metadata.
       subtoolData?: unknown;
-    };
+    }
+);
 
 export type ProxyToolResult = AgentToolResult<ProxyDetails>;
 
