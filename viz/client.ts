@@ -15,7 +15,7 @@ import { appendFileSync, existsSync } from 'node:fs';
 import { dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { CallToolRequestParams, ContentBlock } from '@modelcontextprotocol/sdk/types.js';
+import { ErrorCode, type CallToolRequestParams, type ContentBlock } from '@modelcontextprotocol/sdk/types.js';
 
 import type { McpClient } from '../mcp-client.js';
 import {
@@ -64,6 +64,7 @@ export interface DdvizClientOptions {
 /** Typed params for each JSON-RPC method the iframe may forward to this client. */
 export interface DdvizRequestParamsMap {
   'tools/call': CallToolRequestParams;
+  'ui/message': { role: 'user'; content: ContentBlock[] };
   'ui/update-model-context': { content: ContentBlock[] };
 }
 
@@ -76,7 +77,7 @@ export type DdvizRequestMethod = keyof DdvizRequestParamsMap;
  */
 export type DdvizRequestHandler<M extends DdvizRequestMethod = DdvizRequestMethod> = (
   params: DdvizRequestParamsMap[M],
-  id: unknown,
+  id?: unknown,
 ) => unknown;
 
 export interface ScreenshotResult {
@@ -89,8 +90,13 @@ const stringifyError = (err: unknown): string => (err instanceof Error ? err.mes
 /** Notification the MCP app (iframe) emits once it is ready — see the mcp-app spec. */
 const INITIALIZED_NOTIFICATION = 'ui/notifications/initialized';
 
-/** Max time to wait for `ui/notifications/initialized` after spawning ddviz. */
-const INIT_TIMEOUT_MS = 15_000;
+/** Max time for cold Swift JIT startup and `ui/notifications/initialized`. */
+const INIT_TIMEOUT_MS = 30_000;
+
+/** Generic failure for a request whose handler threw. JSON-RPC 2.0 reserves
+ *  -32000…-32099 for implementation-defined server errors; we use the first
+ *  value. (Distinct from MCP's own transport errors in the same range.) */
+const SERVER_ERROR = -32000;
 
 export class DdvizClient {
   private readonly scriptPath: string;
@@ -116,6 +122,9 @@ export class DdvizClient {
     this.isHeadless = options.isHeadless ?? false;
     this.log = options.log ?? (() => undefined);
     if (options.mcp) this.registerToolCallProxy(options.mcp);
+    // Pi doesn't consume widget model context yet. Acknowledge updates on every
+    // runtime (including headless clients) so apps can finish initializing.
+    this.setRequestHandler('ui/update-model-context', () => ({}));
   }
 
   /**
@@ -387,7 +396,7 @@ export class DdvizClient {
     const { id, method, params } = request;
     const handler = this.requestHandlers.get(method);
     if (!handler) {
-      await this.respondError(id, -32601, `Method not found: ${method}`);
+      await this.respondError(id, ErrorCode.MethodNotFound, `Method not found: ${method}`);
       return;
     }
     this.pendingRequests++;
@@ -395,7 +404,8 @@ export class DdvizClient {
       const result = await handler(params, id);
       await this.respond(id, result);
     } catch (err) {
-      await this.respondError(id, -32000, stringifyError(err));
+      // no-dd-sa:datadog/typescript-errorinfoleak
+      await this.respondError(id, SERVER_ERROR, stringifyError(err));
     } finally {
       this.pendingRequests--;
       if (this.pendingRequests === 0) this.onRequestDrained?.();

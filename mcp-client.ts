@@ -1,209 +1,134 @@
 // Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
-// Thin wrapper around the MCP SDK's Client + StreamableHTTPClientTransport.
-//
-// The wrapper exists to (a) gate connection lazily so Pi startup never has a
-// side effect, (b) decide between OAuth and API-key auth at construction time,
-// and (c) plumb the OAuth callback dance around the SDK's UnauthorizedError.
-//
-// Auth-mode selection — API keys take precedence over OAuth:
-//   - apiKey: BOTH DD_API_KEY and DD_APPLICATION_KEY are set in the env at
-//     construction time. We pass them as request headers and never instantiate
-//     the OAuth provider. Path for headless / SSH / CI contexts; also the
-//     opt-out for users who don't want a browser tab to fly open.
-//   - oauth: at least one of those env vars is missing. We use
-//     DatadogOAuthProvider; the first listTools/callTool may open a browser
-//     and block on the callback. Tokens are cached, refreshes are automatic.
-//
-// We decide once, at construction. To switch modes after startup, change env
-// vars and `/reload` inside Pi (which re-executes the entry file).
-
-import type { Tool, CallToolResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { CallToolResult, ReadResourceResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { OrgIdentity } from './config.js';
+import { parseIdentity, sameIdentity } from './config.js';
+import type { CredentialStore } from './oauth-store.js';
+import { createSilentOAuthFetch, ProfileOAuthProvider } from './oauth-provider.js';
+import type { LoginCallback } from './oauth-callback-server.js';
+import { IdentityMismatch, SignInRequired } from './connection-errors.js';
 
-import { DatadogOAuthProvider } from './oauth-provider.js';
-import { awaitCallback } from './oauth-callback-server.js';
-import { type ParsedUrl, parseMcpUrl } from '#shared/url';
-
-export type AuthMode = 'apiKey' | 'oauth';
-
-const CLIENT_NAME = 'datadog-pi-plugin';
-const CLIENT_VERSION = '0.0.0';
-
-const buildApiKeyHeaders = (): Record<string, string> | undefined => {
-  const apiKey = process.env.DD_API_KEY;
-  const appKey = process.env.DD_APPLICATION_KEY;
-  if (!apiKey || !appKey) return undefined;
-  return { DD_API_KEY: apiKey, DD_APPLICATION_KEY: appKey };
-};
-
-export const detectAuthMode = (): AuthMode => (buildApiKeyHeaders() ? 'apiKey' : 'oauth');
-
-export type McpCallToolArgs = Record<string, unknown> | undefined;
-
-export type McpClient = {
-  readonly authMode: AuthMode;
-  setUrl(url: string): void;
-  listTools(): Promise<Tool[]>;
-  readResource(uri: string): Promise<ReadResourceResult>;
-  callTool(name: string, args: McpCallToolArgs): Promise<CallToolResult>;
+export type ConnectionAuth =
+  | { kind: 'oauth'; store: CredentialStore; login?: LoginCallback }
+  | { kind: 'environment'; headers: Record<string, string> };
+export type ConnectionClient = {
+  readonly authMode: 'oauth' | 'apiKey';
+  identity(signal?: AbortSignal): Promise<OrgIdentity>;
+  listTools(signal?: AbortSignal): Promise<Tool[]>;
+  readResource(uri: string, signal?: AbortSignal): Promise<ReadResourceResult>;
+  callTool(name: string, args: Record<string, unknown> | undefined, signal?: AbortSignal): Promise<CallToolResult>;
   close(): Promise<void>;
 };
 
-type Connection = {
-  client: Client;
-  transport: StreamableHTTPClientTransport;
-  provider?: DatadogOAuthProvider;
-  target: string;
-};
+export const environmentHeaders = (env: NodeJS.ProcessEnv = process.env): Record<string, string> | undefined =>
+  env.DD_API_KEY && env.DD_APPLICATION_KEY
+    ? { DD_API_KEY: env.DD_API_KEY, DD_APPLICATION_KEY: env.DD_APPLICATION_KEY }
+    : undefined;
 
-const parseOrThrow = (target: string): ParsedUrl => {
-  if (!target) throw new Error('Datadog MCP URL not configured — run ddsetup first.');
-  const parsed = parseMcpUrl(target);
-  if (!parsed) throw new Error(`Invalid Datadog MCP URL: ${target}`);
-  return parsed;
-};
-
-// `oauthDir` is the global Datadog state dir (<agentDir>/datadog); OAuth tokens
-// are stored there, per-domain, so sign-in is shared across projects.
-export const createMcpClient = (oauthDir: string, initialUrl: string): McpClient => {
-  const authMode = detectAuthMode();
-  let url = initialUrl;
-  let connection: Connection | undefined;
-  let connecting: Promise<Connection> | undefined;
-  let recovering: Promise<Connection> | undefined;
-
-  const buildTransport = (
-    target: string,
-    parsed: ParsedUrl,
-  ): { transport: StreamableHTTPClientTransport; provider?: DatadogOAuthProvider } => {
-    if (authMode === 'apiKey') {
-      return {
-        transport: new StreamableHTTPClientTransport(new URL(target), {
-          requestInit: { headers: buildApiKeyHeaders() },
-        }),
-      };
-    }
-    const provider = new DatadogOAuthProvider(oauthDir, parsed.domain);
-    return { transport: new StreamableHTTPClientTransport(new URL(target), { authProvider: provider }), provider };
+export const createConnectionClient = (
+  url: string,
+  auth: ConnectionAuth,
+  expected?: OrgIdentity,
+  validate?: () => Promise<void>,
+): ConnectionClient => {
+  let client: Client | undefined;
+  let identity: OrgIdentity | undefined;
+  let connecting: Promise<Client> | undefined;
+  let closed = false;
+  const lifecycle = new AbortController();
+  const assertOpen = () => {
+    if (closed) throw new Error('Datadog connection closed.');
   };
-
-  const finishOAuth = async (
-    transport: StreamableHTTPClientTransport,
-    provider: DatadogOAuthProvider,
-  ): Promise<void> => {
-    const { code } = await awaitCallback(provider.getCurrentState());
-    await transport.finishAuth(code);
-  };
-
-  const connect = async (target: string): Promise<Connection> => {
-    const parsed = parseOrThrow(target);
-    const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION });
-    const built = buildTransport(target, parsed);
-    let transport = built.transport;
-    let provider = built.provider;
-
-    try {
-      await client.connect(transport);
-    } catch (err) {
-      if (!(err instanceof UnauthorizedError) || authMode !== 'oauth' || !provider) throw err;
-
-      // The provider has already kicked off `open(authorizeUrl)`. Wait for the
-      // browser callback to deliver the code, then complete the exchange.
-      await finishOAuth(transport, provider);
-
-      // Per the SDK docs, finishAuth doesn't re-attempt the connection; build a
-      // fresh transport (the old one is in a failed-handshake state) and
-      // reconnect. Tokens are now in the provider's store; the SDK will use
-      // them transparently on this call.
-      const rebuilt = buildTransport(target, parsed);
-      transport = rebuilt.transport;
-      provider = rebuilt.provider;
-      await client.connect(transport);
-    }
-
-    return { client, transport, provider, target };
-  };
-
-  const ensureConnected = async (): Promise<Connection> => {
-    if (connection) return connection;
-    connecting ??= connect(url).then((c) => {
-      connection = c;
-      return c;
+  const fetchWithSignal: typeof fetch = (input, init) =>
+    fetch(input, {
+      ...init,
+      signal: AbortSignal.any([
+        lifecycle.signal,
+        ...(init?.signal ? [init.signal] : []),
+        ...(auth.kind === 'oauth' && auth.login?.signal ? [auth.login.signal] : []),
+      ]),
     });
+  const transport = () =>
+    new StreamableHTTPClientTransport(new URL(url), {
+      authProvider: auth.kind === 'oauth' && auth.login ? new ProfileOAuthProvider(auth.store, auth.login) : undefined,
+      requestInit: auth.kind === 'environment' ? { headers: auth.headers } : undefined,
+      fetch:
+        auth.kind === 'oauth' && !auth.login
+          ? createSilentOAuthFetch(url, auth.store, fetchWithSignal)
+          : fetchWithSignal,
+    });
+  const connect = async (signal?: AbortSignal): Promise<Client> => {
+    signal?.throwIfAborted();
+    assertOpen();
+    const next = new Client({ name: 'datadog-pi-plugin', version: '0.0.0' });
+    let wire = transport();
     try {
-      return await connecting;
-    } finally {
-      connecting = undefined;
-    }
-  };
-
-  const close = async (): Promise<void> => {
-    const current = connection;
-    connection = undefined;
-    if (current) {
       try {
-        await current.client.close();
-      } catch {
-        // best effort — we're tearing down anyway
+        await next.connect(wire, { signal });
+      } catch (error) {
+        if (!(error instanceof UnauthorizedError) || auth.kind !== 'oauth' || !auth.login) throw error;
+        const code = await auth.login.code;
+        signal?.throwIfAborted();
+        await wire.finishAuth(code);
+        await wire.close();
+        wire = transport();
+        await next.connect(wire, { signal });
       }
-    }
-  };
-
-  const recoverAuth = async (current: Connection): Promise<Connection> => {
-    const provider = current.provider;
-    if (!provider) throw new Error('OAuth provider unavailable for authentication recovery');
-
-    recovering ??= (async () => {
-      await finishOAuth(current.transport, provider);
-      try {
-        await current.client.close();
-      } catch {
-        // best effort — the failed connection will be replaced
-      }
-      if (connection === current) connection = undefined;
-      const next = await connect(current.target);
-      connection = next;
+      const result = await next.readResource({ uri: 'datadog://mcp/whoami' }, { signal });
+      const text = result.contents.find((entry) => 'text' in entry)?.text;
+      if (typeof text !== 'string') throw new Error('Datadog organization verification is unavailable.');
+      const actual = parseIdentity(JSON.parse(text) as unknown);
+      if (expected && !sameIdentity(actual, expected)) throw new IdentityMismatch();
+      assertOpen();
+      identity = actual;
+      client = next;
       return next;
-    })();
-
-    try {
-      return await recovering;
-    } finally {
-      recovering = undefined;
+    } catch (error) {
+      await next.close().catch(() => undefined);
+      await wire.close().catch(() => undefined);
+      throw error;
     }
   };
-
-  const withAuthRecovery = async <T>(operation: (client: Client) => Promise<T>): Promise<T> => {
-    const current = await ensureConnected();
-    try {
-      return await operation(current.client);
-    } catch (err) {
-      if (!(err instanceof UnauthorizedError) || authMode !== 'oauth') throw err;
-      const next = await recoverAuth(current);
-      return await operation(next.client);
-    }
+  const ensure = async (signal?: AbortSignal): Promise<Client> => {
+    assertOpen();
+    if (client) return client;
+    connecting ??= connect(signal).finally(() => {
+      connecting = undefined;
+    });
+    return connecting;
   };
-
+  const run = async <T>(operation: (current: Client) => Promise<T>, signal?: AbortSignal): Promise<T> => {
+    signal?.throwIfAborted();
+    await validate?.();
+    // A sign-out in another process must also stop an existing transport.
+    if (auth.kind === 'oauth' && !auth.login && !(await auth.store.read()).tokens) throw new SignInRequired();
+    return operation(await ensure(signal));
+  };
   return {
-    authMode,
-    setUrl(next) {
-      url = next;
-      void close();
+    authMode: auth.kind === 'oauth' ? 'oauth' : 'apiKey',
+    identity: (signal) => run(async () => identity!, signal),
+    listTools: (signal) => run(async (current) => (await current.listTools({}, { signal })).tools, signal),
+    readResource: (uri, signal) => run((current) => current.readResource({ uri }, { signal }), signal),
+    callTool: (name, args, signal) =>
+      run(
+        async (current) =>
+          (await current.callTool({ name, arguments: args ?? {} }, undefined, { signal })) as CallToolResult,
+        signal,
+      ),
+    async close() {
+      closed = true;
+      lifecycle.abort();
+      await client?.close();
+      client = undefined;
+      identity = undefined;
     },
-    async listTools() {
-      const result = await withAuthRecovery((client) => client.listTools());
-      return result.tools;
-    },
-    readResource(uri) {
-      return withAuthRecovery((client) => client.readResource({ uri }));
-    },
-    async callTool(name, args) {
-      return (await withAuthRecovery((client) => client.callTool({ name, arguments: args ?? {} }))) as CallToolResult;
-    },
-    close,
   };
 };
+
+export type AuthMode = 'oauth' | 'apiKey';
+export type McpCallToolArgs = Record<string, unknown> | undefined;
+export type McpClient = Omit<ConnectionClient, 'identity'>;

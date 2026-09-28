@@ -9,6 +9,7 @@ import type { McpClient } from '../mcp-client.js';
 import type { SubtoolOverrides } from '../tools/proxy.js';
 import type { SubtoolConfig } from '../tools/types.js';
 import { createLogger, DdvizClient, type Logger, type ScreenshotResult } from './client.js';
+import { createUiMessageHandler } from './ui-message.js';
 import { checkActivation } from './compat.js';
 
 import type { JsonRpcNotification } from './jsonrpc2.js';
@@ -159,13 +160,15 @@ const toToolResultNotification = (raw: CallToolResult): JsonRpcNotification => (
 });
 
 /** Build the viz override (execute + render) for a single upstream tool. */
+type Runtime = { mcp: McpClient; client: DdvizClient; screenshotQueue: ScreenshotQueue };
+
 const createSubtool = (
-  client: DdvizClient,
-  screenshotQueue: ScreenshotQueue,
   toolName: string,
   log: Logger,
+  getRuntime: (mcp: McpClient) => Promise<Runtime>,
 ): SubtoolConfig => ({
   async execute(_toolCallId, params, signal, onUpdate, ctx, mcp) {
+    const { client, screenshotQueue } = await getRuntime(mcp);
     const emitPhase = (phase: VizSubtoolData['phase']) =>
       onUpdate?.({
         content: [],
@@ -173,7 +176,7 @@ const createSubtool = (
       });
 
     emitPhase('fetching');
-    const raw = await mcp.callTool(params.tool!, params.args);
+    const raw = await mcp.callTool(params.tool!, params.args, signal);
     const text = raw.content.map((c) => (c.type === 'text' ? c.text : JSON.stringify(c))).join('\n');
 
     // Only widgets carry structured content, and renderResult only runs in TUI mode.
@@ -227,7 +230,10 @@ const createSubtool = (
     const bgKey = isPartial ? 'toolPendingBg' : isError ? 'toolErrorBg' : 'toolSuccessBg';
     const box = new Box(1, 1, (s) => theme.bg(bgKey, s));
 
-    const header = theme.fg('accent', theme.bold('\ud83d\udc36 Datadog Widget'));
+    const header = theme.fg(
+      'accent',
+      theme.bold(`Datadog Widget${details.profile ? ` · ${details.profile.label}` : ''}`),
+    );
     let phaseLabel: string;
     switch (phase) {
       case 'fetching':
@@ -288,8 +294,10 @@ const createSubtool = (
       }
 
       // Full textual tool output below the image.
-      const firstContent = result.content[0];
-      const text = firstContent.type === 'text' ? firstContent.text.replace(/\r/g, '') : '';
+      const text = result.content
+        .filter((content) => content.type === 'text')
+        .map((content) => content.text.replace(/\r/g, ''))
+        .join('\n');
       if (text) {
         box.addChild(new Spacer(1));
         box.addChild(new Text(theme.fg('toolOutput', text), 0, 0));
@@ -301,37 +309,52 @@ const createSubtool = (
 
 /**
  * Initialise the viz integration on compatible platforms and return the subtool
- * override map for the proxy. Returns null on unsupported hosts so the proxy
- * degrades to text-only without extra checks at the call site.
+ * override map and a reset hook. Unsupported hosts stay text-only. Each runtime
+ * is bound to an immutable client; switching discards both visible and headless UI.
  */
-export const initVizRuntime = (pi: ExtensionAPI, mcp: McpClient | undefined): SubtoolOverrides | null => {
+export const initVizRuntime = (pi: ExtensionAPI): { subtools: SubtoolOverrides; reset(): Promise<void> } => {
   const isDebug = process.env.DDVIZ_DEBUG === '1';
   const log = createLogger(isDebug);
+  let runtime: Runtime | undefined;
+  let transition: Promise<unknown> = Promise.resolve();
+  const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+    const next = transition.then(operation);
+    transition = next.catch(() => undefined);
+    return next;
+  };
+  const closeCurrent = async (): Promise<void> => {
+    const previous = runtime;
+    runtime = undefined;
+    if (previous) {
+      try {
+        await previous.screenshotQueue.shutdown();
+      } finally {
+        await previous.client.shutdown();
+      }
+    }
+  };
+  const reset = () => serialize(closeCurrent);
+  if (!checkActivation().ok) return { subtools: {}, reset };
 
-  const activation = checkActivation();
-  if (!activation.ok) {
-    log(`[viz] disabled: ${activation.reason}`);
-    return null;
-  }
-
-  const client = new DdvizClient({ log, isDebug, mcp });
-  const screenshotQueue = new ScreenshotQueue(mcp, log);
-
+  // Subscribe before session_start; clients are created lazily and replaced on org switches.
+  const onUiMessage = createUiMessageHandler(pi);
+  const getRuntime = (mcp: McpClient): Promise<Runtime> =>
+    serialize(async () => {
+      if (runtime?.mcp === mcp) return runtime;
+      await closeCurrent();
+      const client = new DdvizClient({ log, isDebug, mcp });
+      client.setRequestHandler('ui/message', onUiMessage);
+      runtime = { mcp, client, screenshotQueue: new ScreenshotQueue(mcp, log) };
+      return runtime;
+    });
   pi.registerShortcut(DDVIZ_TOGGLE_SHORTCUT, {
     description: 'Toggle Datadog visualization panel',
-    handler: () => {
-      void client.toggle();
+    handler: async (_ctx) => {
+      await runtime?.client.toggle();
     },
   });
-
-  pi.on('session_shutdown', async () => {
-    log('[viz] session_shutdown — stopping screenshot queue');
-    await screenshotQueue.shutdown();
-  });
-
-  client.setRequestHandler('ui/update-model-context', async (_params) => {
-    // pi does not allow updating the next prompt message yet.
-  });
-
-  return Object.fromEntries(VizToolNames.map((name) => [name, createSubtool(client, screenshotQueue, name, log)]));
+  return {
+    subtools: Object.fromEntries(VizToolNames.map((name) => [name, createSubtool(name, log, getRuntime)])),
+    reset,
+  };
 };
