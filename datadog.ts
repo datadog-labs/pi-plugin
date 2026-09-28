@@ -12,7 +12,7 @@ import { createDatadogProxy } from './tools/proxy.js';
 import { initVizRuntime } from './viz/index.js';
 import { makeUrlBuilder } from '#shared/url';
 
-const PLUGIN_VERSION = '0.7.16';
+const PLUGIN_VERSION = '0.7.17';
 const PLUGIN_ID = 'pi-plugin';
 const MCP_FILE = 'datadog.json';
 const MCP_ENABLED_TOOLSETS = 'core,visualizations';
