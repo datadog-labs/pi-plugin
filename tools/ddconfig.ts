@@ -16,17 +16,17 @@ export const createDdconfig = ({ connections }: ToolDeps) =>
     parameters: Type.Object({ action: Type.Optional(Type.Union([Type.Literal('status'), Type.Literal('check')])) }),
     async execute(_id, params, signal): Promise<AgentToolResult<{ state: string; profileId?: string }>> {
       try {
-        const selected = await connections.current();
+        let selected = await connections.current();
         if (!selected)
           return {
             content: [{ type: 'text' as const, text: 'No Datadog organization selected. Open /datadog to connect.' }],
             details: { state: 'not-connected' },
           };
         if (params.action === 'check')
-          await connections.check(
+          selected = await connections.check(
             signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
           );
-        const { profile, toolsets, scope } = (await connections.current())!;
+        const { profile, toolsets, scope } = selected;
         const registry = await connections.store.read();
         const status = connections.isVerified ? 'Verified in this session' : 'Saved; not checked in this session';
         const text = [

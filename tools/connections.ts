@@ -254,6 +254,15 @@ const select = async (connections: Connections, ctx: ExtensionCommandContext, pr
   });
 };
 
+const checkConnection = async (connections: Connections, ctx: ExtensionCommandContext): Promise<void> => {
+  const result = await withConnectionProgress(ctx, 'Checking Datadog connection…', (signal) =>
+    connections.check(AbortSignal.any([signal, AbortSignal.timeout(15_000)])),
+  );
+  if (!result.ok) return;
+  const { profile } = result.value;
+  ctx.ui.notify(`Connected to ${profileLabel(profile)} · ${profile.domain}`, 'info');
+};
+
 export const manageConnections = async (connections: Connections, ctx: ExtensionCommandContext): Promise<void> => {
   for (;;) {
     const registry = await connections.store.read();
@@ -296,6 +305,6 @@ export const manageConnections = async (connections: Connections, ctx: Extension
     } else if (choice === 'Connection details') await details(connections, ctx, profile);
     else if (choice === 'Sign in again') await connect(connections, ctx, profile);
     else if (choice === 'Connect another organization') await connect(connections, ctx);
-    else await select(connections, ctx, profile);
+    else if (choice === 'Check connection') await checkConnection(connections, ctx);
   }
 };

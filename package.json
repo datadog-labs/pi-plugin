@@ -1,6 +1,6 @@
 {
   "name": "@datadog/pi-plugin",
-  "version": "0.7.17",
+  "version": "0.7.18",
   "description": "Use Datadog directly in the Pi coding agent through a preconfigured Datadog MCP server. Query logs, metrics, traces, dashboards, and more through natural conversation.",
   "main": "datadog.ts",
   "type": "module",

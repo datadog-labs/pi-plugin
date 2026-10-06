@@ -12,11 +12,22 @@ import { createDatadogProxy } from './tools/proxy.js';
 import { initVizRuntime } from './viz/index.js';
 import { makeUrlBuilder } from '#shared/url';
 
-const PLUGIN_VERSION = '0.7.17';
+const PLUGIN_VERSION = '0.7.18';
 const PLUGIN_ID = 'pi-plugin';
 const MCP_FILE = 'datadog.json';
 const MCP_ENABLED_TOOLSETS = 'core,visualizations';
 const SELECTION_ENTRY = 'datadog-selection';
+const ORGANIZATION_SECTION = 'datadog_organization';
+
+const organizationNotice = async (connections: Connections): Promise<string | undefined> => {
+  try {
+    const selected = await connections.current();
+    if (!selected) return undefined;
+    return `The selected Datadog organization is ${profileLabel(selected.profile)} at ${selected.profile.domain}, UUID ${selected.profile.identity?.orgUuid ?? 'not yet verified'}. Datadog calls target this connection only. Ask the user to use /datadog to switch organizations; do not edit credential/config files to switch. Earlier results may belong to a different organization.`;
+  } catch {
+    return 'The Datadog selection is invalid. Ask the user to open /datadog; do not fall back to another organization.';
+  }
+};
 
 export default function activate(pi: ExtensionAPI): void {
   const connections = new Connections({
@@ -52,30 +63,13 @@ export default function activate(pi: ExtensionAPI): void {
   pi.on('session_shutdown', async () => {
     await connections.close();
   });
-  pi.on('before_agent_start', async () => {
-    try {
-      const selected = await connections.current();
-      if (!selected) return;
-      return {
-        message: {
-          customType: 'datadog-organization',
-          display: false,
-          content: `The selected Datadog organization is ${profileLabel(selected.profile)} at ${selected.profile.domain}, UUID ${selected.profile.identity?.orgUuid ?? 'not yet verified'}. Datadog calls target this connection only. Ask the user to use /datadog to switch organizations; do not edit credential/config files to switch. Earlier results may belong to a different organization.`,
-        },
-      };
-    } catch {
-      return {
-        message: {
-          customType: 'datadog-organization',
-          display: false,
-          content:
-            'The Datadog selection is invalid. Ask the user to open /datadog; do not fall back to another organization.',
-        },
-      };
-    }
+  // A prompt section, unlike a returned message, is only re-sent to the model when its text changes.
+  pi.on('before_agent_start', async ({ systemPromptOptions: { sections } }) => {
+    const notice = await organizationNotice(connections);
+    if (notice) sections[ORGANIZATION_SECTION] = notice;
   });
   pi.registerTool(createDatadogProxy(deps, viz.subtools));
   pi.registerTool(createDdconfig(deps));
   pi.registerTool(createDdtoolsets(deps));
-  registerDatadogCommands(pi, deps);
+  registerDatadogCommands(pi, deps, viz);
 }
