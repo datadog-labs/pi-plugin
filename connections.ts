@@ -3,7 +3,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { UrlBuilder } from '#shared/url';
+import type { ConnectionBuilder } from '#shared/url';
 import { isBareHostname, isKnownDomain } from '#shared/site';
 import {
   createConnectionClient,
@@ -37,7 +37,7 @@ export type ConnectionOptions = {
   cwd: string;
   globalDir: string;
   mcpFile: string;
-  urls: UrlBuilder;
+  endpoint: ConnectionBuilder;
   defaultToolsets: string;
   headers?: Record<string, string>;
   makeClient?: typeof createConnectionClient;
@@ -203,7 +203,7 @@ export class Connections {
       auth = { kind: 'environment', headers: this.headers };
     }
     const client = this.makeClient(
-      this.options.urls.build(profile.domain, toolsets),
+      this.options.endpoint.build(profile.domain, toolsets),
       auth,
       profile.identity,
       async () => {
@@ -386,7 +386,7 @@ export class Connections {
         auth = { kind, headers: this.headers };
       }
       client = this.makeClient(
-        this.options.urls.build(domain, existing?.toolsets ?? this.options.defaultToolsets),
+        this.options.endpoint.build(domain, existing ? this.describe(existing).toolsets : this.options.defaultToolsets),
         auth,
         existing?.identity,
       );

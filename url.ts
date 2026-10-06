@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed under the Apache-2.0 License.
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
-// MCP URL construction and parsing.
+// MCP connection metadata, URL construction, and parsing.
 //
 // `makeUrlBuilder` is a factory so the entry file can hand in the build-time
 // PLUGIN_ID / PLUGIN_VERSION constants (substituted by bundle.ts in the entry
@@ -22,6 +22,25 @@ export const parseMcpUrl = (url: string): ParsedUrl | undefined => {
     return undefined;
   }
 };
+
+export type McpConnectionConfig = { url: string; headers: Record<string, string>; version: string };
+export type ConnectionBuilder = { build(domain: string, toolsets: string): McpConnectionConfig };
+
+// Header-based connections keep the endpoint stable across plugin updates and
+// toolset changes. The legacy URL builder below remains in use by OpenCode.
+export const makeConnectionBuilder = (opts: { clientId: string; version: string }): ConnectionBuilder => ({
+  build(domain, toolsets) {
+    return {
+      url: new URL(MCP_PATH, `https://${domain}`).toString(),
+      headers: {
+        'X-Datadog-MCP-Referrer-Name': opts.clientId,
+        'X-Datadog-MCP-Referrer-Version': opts.version,
+        'X-Datadog-MCP-Toolsets': toolsets,
+      },
+      version: opts.version,
+    };
+  },
+});
 
 export type UrlBuilder = { build(domain: string, toolsets: string): string };
 
