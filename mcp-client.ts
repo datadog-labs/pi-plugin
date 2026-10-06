@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { CallToolResult, ReadResourceResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { McpConnectionConfig } from '#shared/url';
 import type { OrgIdentity } from './config.js';
 import { parseIdentity, sameIdentity } from './config.js';
 import type { CredentialStore } from './oauth-store.js';
@@ -30,7 +31,7 @@ export const environmentHeaders = (env: NodeJS.ProcessEnv = process.env): Record
     : undefined;
 
 export const createConnectionClient = (
-  url: string,
+  { url, headers, version }: McpConnectionConfig,
   auth: ConnectionAuth,
   expected?: OrgIdentity,
   validate?: () => Promise<void>,
@@ -55,7 +56,7 @@ export const createConnectionClient = (
   const transport = () =>
     new StreamableHTTPClientTransport(new URL(url), {
       authProvider: auth.kind === 'oauth' && auth.login ? new ProfileOAuthProvider(auth.store, auth.login) : undefined,
-      requestInit: auth.kind === 'environment' ? { headers: auth.headers } : undefined,
+      requestInit: { headers: { ...headers, ...(auth.kind === 'environment' ? auth.headers : {}) } },
       fetch:
         auth.kind === 'oauth' && !auth.login
           ? createSilentOAuthFetch(url, auth.store, fetchWithSignal)
@@ -64,7 +65,7 @@ export const createConnectionClient = (
   const connect = async (signal?: AbortSignal): Promise<Client> => {
     signal?.throwIfAborted();
     assertOpen();
-    const next = new Client({ name: 'datadog-pi-plugin', version: '0.0.0' });
+    const next = new Client({ name: 'datadog-pi-plugin', version });
     let wire = transport();
     try {
       try {

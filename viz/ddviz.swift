@@ -27,7 +27,7 @@ import WebKit
 struct Config {
 
   static let appName = "ddviz"
-  static let appVersion = "0.7.18"
+  static let appVersion = "0.7.19"
   static let pluginId = "pi-plugin"
   static let defaultWindowWidth = 610.0
   static let defaultWindowHeight = 400.0
