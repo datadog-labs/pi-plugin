@@ -53,6 +53,38 @@ The agent has three tools:
 
 `/datadog setup` and `/datadog configure` without arguments open the same connection screen for compatibility. Their old site/scope arguments and the separate `ddsetup` tool have been removed. Authentication and switching are user-controlled through `/datadog`.
 
+## Visualization panel (macOS preview)
+
+Start Pi with `DDVIZ_ENABLED=1` to enable ddviz (requires macOS 13+ and Xcode Command Line Tools). After generating a Datadog chart, press **Shift+Right Arrow** (Shift+→) in Pi's editor to show the interactive panel. This works in Apple Terminal.app without extra keyboard configuration and does not conflict with Pi's default bindings.
+
+When the panel has focus, press **Escape** or **Cmd+W** to close it. Shift+Right Arrow is not intercepted there, so text selection in the panel remains available.
+
+Run `/datadog ddviz` to check whether ddviz is enabled, supported, and available on this machine:
+
+- **Machine prerequisites** — macOS, Xcode Command Line Tools, Swift
+- **Installation** — the plugin's bundled files
+- **Terminal** — inline-image protocol support
+- **Runtime** — whether the visualization panel's processes are running
+- **Connectivity** — reachability of the selected Datadog organization
+
+Each failing check explains what to do about it. The command is read-only: it never starts the panel, changes the organization, signs in, or enables the feature. Not running is the normal steady state; the runtime starts on the first chart-producing tool call.
+
+### Why Shift+Right Arrow?
+
+The shortcut must work in Apple Terminal.app without extra configuration and avoid conflicts with Pi's default bindings, including those used only in pickers. Shift+Right Arrow meets both requirements: shifted arrows have distinct legacy terminal sequences, unlike Ctrl+Shift+letter combinations. Pi's editor does not use it for text selection, and the hint displays **Shift+→** to make the arrow key unambiguous. User-defined keybindings or other extensions can still introduce conflicts.
+
+Alternatives tried or evaluated:
+
+| Shortcut     | Why it was not retained                                                                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ctrl+Shift+O | Original binding. Terminal.app sends the same input as Ctrl+O, which Pi uses to expand/collapse tool output.                                             |
+| Ctrl+R       | First replacement, tested locally. It works in the editor but triggers a startup conflict warning because Pi binds it to session renaming in the picker. |
+| Alt/Option+O | Unused in Pi's defaults, but Terminal.app needs "Use Option as Meta key" enabled; otherwise Option+O types a character.                                  |
+| Ctrl+Q       | Available in Pi's macOS defaults, but rejected because it suggests quitting rather than showing a panel.                                                 |
+| F6           | Unused in Pi's defaults and supported by legacy terminals, but often requires Fn/Globe on Mac keyboards; a non-function-key shortcut was preferred.      |
+| Ctrl+Space   | Can be intercepted by macOS input-source switching.                                                                                                      |
+| Ctrl+\\      | Conventionally sends the terminal quit signal, so it has the same quit-related drawback as Ctrl+Q.                                                       |
+
 ## Storage and project overrides
 
 The default state directory is `~/.pi/agent/datadog/`, following Pi's `PI_CODING_AGENT_DIR` override when set.

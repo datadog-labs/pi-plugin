@@ -1,11 +1,14 @@
 /**
- * Activation gate for the ddviz client.
+ * Activation gate and machine diagnostics for the ddviz client.
  *
  * ddviz relies on a macOS WebView host driven through the Swift toolchain, so
  * the runtime is only available on recent macOS with `swift` on PATH.
  *
- * It's also opt-in while in preview in feature-flagging is not yet implemented
- * on server-side: set DDVIZ_ENABLED=1 (or "true") to turn it on.
+ * It's also opt-in while in preview, since server-side feature-flagging is
+ * not yet implemented: set DDVIZ_ENABLED=1 (or "true") to turn it on.
+ *
+ * `checkSupportDiagnostics` serves both the activation gate and the
+ * /datadog ddviz status report, so the two can never disagree.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -16,50 +19,95 @@ export interface ActivationStatus {
   reason?: string;
 }
 
-const isEnabledByEnv = (): boolean => {
+export interface DiagnosticCheck {
+  state: 'ok' | 'warn' | 'fail' | 'skipped';
+  detail: string;
+  nextAction?: string;
+}
+
+export type SupportDiagnostics = Record<'platform' | 'xcodeTools' | 'swift', DiagnosticCheck>;
+
+interface SupportProbe {
+  platform: string;
+  kernelRelease: string;
+  run(command: string, args: string[]): { status: number | null; stdout: string };
+}
+
+export const isEnabledByEnv = (): boolean => {
   const value = (process.env.DDVIZ_ENABLED ?? '').toLowerCase();
   return value === '1' || value === 'true';
 };
 
-/**
- * Whether the current machine is capable of running ddviz at all (OS version,
- * Xcode Command Line Tools, swift toolchain), independent of the opt-in
- * feature flag.
- */
-export const checkSupport = (): ActivationStatus => {
-  switch (process.platform) {
-    case 'darwin': {
-      const MIN_DARWIN_MAJOR = 22; // macOS 13
-      const version = release();
-      const major = parseInt(version.split('.')[0] ?? '', 10);
-      if (!Number.isInteger(major) || major < MIN_DARWIN_MAJOR) {
-        return { ok: false, reason: `ddviz requires macOS 13 or later (detected Darwin kernel ${version})` };
-      }
-      // check Xcode Command Line Tools are installed
-      if (spawnSync('xcode-select', ['-p']).status !== 0) {
-        return { ok: false, reason: 'ddviz requires the Xcode Command Line Tools (run `xcode-select --install`)' };
-      }
-      // check swift toolchain is available
-      if (spawnSync('which', ['swift']).status !== 0) {
-        return { ok: false, reason: 'ddviz requires the Swift toolchain (swift not found on PATH)' };
-      }
-      return { ok: true };
-    }
-    default:
-      return { ok: false, reason: `ddviz unsupported on current platform: ${process.platform}` };
+/** Prerequisites shared by activation and diagnostics, independent of the temporary feature gate. */
+export const checkSupportDiagnostics = (
+  probe: SupportProbe = {
+    platform: process.platform,
+    kernelRelease: release(),
+    run: (command, args) => spawnSync(command, args, { encoding: 'utf8', timeout: 3_000 }),
+  },
+): SupportDiagnostics => {
+  const major = parseInt(probe.kernelRelease.split('.')[0] ?? '', 10);
+  if (probe.platform !== 'darwin' || !Number.isInteger(major) || major < 22) {
+    return {
+      platform: {
+        state: 'fail',
+        detail:
+          probe.platform === 'darwin'
+            ? `ddviz requires macOS 13 or later (detected Darwin kernel ${probe.kernelRelease})`
+            : `ddviz unsupported on current platform: ${probe.platform}`,
+        nextAction:
+          probe.platform === 'darwin'
+            ? 'Use macOS 13 or later for ddviz; Datadog text results remain available.'
+            : 'ddviz is only supported on macOS.',
+      },
+      xcodeTools: { state: 'skipped', detail: 'unsupported platform' },
+      swift: { state: 'skipped', detail: 'unsupported platform' },
+    };
   }
+  const platform = { state: 'ok' as const, detail: `macOS (Darwin ${probe.kernelRelease})` };
+
+  const xcode = probe.run('xcode-select', ['-p']);
+  if (xcode.status !== 0) {
+    return {
+      platform,
+      xcodeTools: {
+        state: 'fail',
+        detail: 'Xcode Command Line Tools not available',
+        nextAction: 'Run `xcode-select --install`, then restart Pi.',
+      },
+      // Invoking Swift without Command Line Tools can open the macOS installer.
+      swift: { state: 'skipped', detail: 'Xcode Command Line Tools unavailable' },
+    };
+  }
+
+  const swiftProbe = probe.run('which', ['swift']);
+  return {
+    platform,
+    xcodeTools: { state: 'ok', detail: xcode.stdout.trim() },
+    swift:
+      swiftProbe.status === 0
+        ? { state: 'ok', detail: swiftProbe.stdout.trim() }
+        : {
+            state: 'fail',
+            detail: 'Swift not found on PATH',
+            nextAction: 'Install the Swift toolchain and make swift available on PATH, then restart Pi.',
+          },
+  };
 };
 
-const computeActivationStatus = (): ActivationStatus => {
-  if (!isEnabledByEnv()) {
-    return { ok: false, reason: 'ddviz is disabled (set DDVIZ_ENABLED=1 to enable)' };
-  }
-
-  return checkSupport();
+const checkSupport = (): ActivationStatus => {
+  const failure = Object.values(checkSupportDiagnostics()).find((check) => check.state === 'fail');
+  return failure ? { ok: false, reason: `${failure.detail}. ${failure.nextAction}` } : { ok: true };
 };
 
-// Check whether the ddviz client is activated and supported. The result is
-// memoized because it shells out to sync subprocesses and activation does not
-// change during a session.
-let cachedStatus: ActivationStatus | undefined;
-export const checkActivation = (): ActivationStatus => (cachedStatus ??= computeActivationStatus());
+const computeActivationStatus = (): ActivationStatus & { enabled: boolean } => {
+  const enabled = isEnabledByEnv();
+  return enabled
+    ? { ...checkSupport(), enabled }
+    : { ok: false, enabled, reason: 'ddviz is disabled (set DDVIZ_ENABLED=1 to enable)' };
+};
+
+// Activation is fixed for this extension instance; status must report the same gate decision.
+let cachedStatus: ReturnType<typeof computeActivationStatus> | undefined;
+export const checkActivation = (): ReturnType<typeof computeActivationStatus> =>
+  (cachedStatus ??= computeActivationStatus());

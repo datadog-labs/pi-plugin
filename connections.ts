@@ -58,7 +58,7 @@ export class Connections {
   private project: ProjectSelection | undefined;
   private trusted = false;
   private selectionError: Error | undefined;
-  private active: { key: string; client: ConnectionClient; verified: boolean } | undefined;
+  private active: { key: string; client: ConnectionClient; profile: Profile; verified: boolean } | undefined;
   private signingIn = false;
   private loginAbort: AbortController | undefined;
   private readonly headers: Record<string, string> | undefined;
@@ -225,27 +225,38 @@ export class Connections {
     return managed;
   }
 
-  private async verify(
-    selection: SelectedConnection,
-    client: ConnectionClient,
-    signal?: AbortSignal,
-  ): Promise<OrgIdentity> {
-    const identity = await client.identity(signal);
-    if (selection.profile.identity && !sameIdentity(selection.profile.identity, identity)) throw new IdentityMismatch();
-    if (!selection.profile.identity) {
-      await this.store.update((registry) => {
-        // Reading a legacy registry also migrates its metadata on the first use.
-        const profile = resolveProfile(registry, selection.profile.id)!;
-        if (profile.identity && !sameIdentity(profile.identity, identity)) throw new IdentityMismatch();
-        profile.identity = identity;
-      });
-      selection.profile.identity = identity;
+  private async verify(profile: Profile, identity: OrgIdentity): Promise<void> {
+    if (profile.identity && !sameIdentity(profile.identity, identity)) throw new IdentityMismatch();
+    if (!profile.identity) {
+      const current = resolveProfile(await this.store.read(), profile.id)!;
+      if (current.identity && !sameIdentity(current.identity, identity)) throw new IdentityMismatch();
     }
-    return identity;
+  }
+
+  private async persistLegacyIdentity(profile: Profile, identity: OrgIdentity): Promise<void> {
+    if (profile.identity) return;
+    await this.store.update((registry) => {
+      const current = resolveProfile(registry, profile.id)!;
+      if (current.identity && !sameIdentity(current.identity, identity)) throw new IdentityMismatch();
+      current.identity = identity;
+    });
+    profile.identity = identity;
   }
 
   connection(signal?: AbortSignal): Promise<VerifiedConnection> {
-    return this.serialize((version) => this.openConnection(version, signal));
+    return this.serialize(async (version) => {
+      const connection = await this.openConnection(version, signal);
+      const active = this.active!;
+      try {
+        await this.persistLegacyIdentity(connection.profile, connection.identity);
+        // Pin the cached client's guard only after the registry binding succeeds.
+        active.profile.identity = connection.identity;
+        return connection;
+      } catch (error) {
+        active.verified = false;
+        throw error;
+      }
+    });
   }
 
   private async openConnection(version: number, signal?: AbortSignal): Promise<VerifiedConnection> {
@@ -261,12 +272,13 @@ export class Connections {
     let active = this.active;
     if (active?.key !== key) {
       const previous = active;
-      active = { key, client: this.build(selected), verified: false };
+      active = { key, client: this.build(selected), profile: selected.profile, verified: false };
       this.active = active;
       await previous?.client.close();
     }
     try {
-      const identity = await this.verify(selected, active.client, signal);
+      const identity = await active.client.identity(signal);
+      await this.verify(selected.profile, identity);
       active.verified = true;
       return { ...selected, client: active.client, identity };
     } catch (error) {
@@ -276,14 +288,15 @@ export class Connections {
   }
 
   async check(signal?: AbortSignal): Promise<VerifiedConnection> {
-    const connection = await this.connection(signal);
+    const connection = await this.serialize((version) => this.openConnection(version, signal));
     try {
       const resource = await connection.client.readResource('datadog://mcp/whoami', signal);
       const text = resource.contents.find((entry) => 'text' in entry)?.text;
       if (typeof text !== 'string') throw new Error('Datadog organization verification is unavailable.');
       const identity = parseIdentity(JSON.parse(text) as unknown);
       if (!sameIdentity(identity, connection.identity)) throw new IdentityMismatch();
-      return connection;
+      await this.verify(connection.profile, identity);
+      return { ...connection, profile: { ...connection.profile, identity } };
     } catch (error) {
       if (this.active?.client === connection.client) this.active.verified = false;
       throw error;
@@ -298,7 +311,9 @@ export class Connections {
       const selection = this.describe(profile);
       const client = this.build(selection);
       try {
-        await this.verify(selection, client, signal);
+        const identity = await client.identity(signal);
+        await this.verify(profile, identity);
+        await this.persistLegacyIdentity(profile, identity);
         signal?.throwIfAborted();
         await this.onReset();
         signal?.throwIfAborted();
@@ -318,6 +333,7 @@ export class Connections {
       this.active = {
         key: JSON.stringify([id, profile.domain, profile.auth, selection.toolsets]),
         client,
+        profile,
         verified: true,
       };
       // close() invalidates and aborts the old transport before awaiting cleanup.
@@ -449,7 +465,9 @@ export class Connections {
       let client: ConnectionClient | undefined;
       try {
         client = this.build(selection);
-        await this.verify(selection, client, AbortSignal.any([signal, AbortSignal.timeout(15_000)]));
+        const identity = await client.identity(AbortSignal.any([signal, AbortSignal.timeout(15_000)]));
+        await this.verify(profile, identity);
+        await this.persistLegacyIdentity(profile, identity);
       } catch (error) {
         signal.throwIfAborted();
         throw new Error(

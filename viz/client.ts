@@ -28,8 +28,8 @@ import {
 } from './jsonrpc2.js';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
-// ddviz.swift lives alongside this file in surface/
-const DEFAULT_DDVIZ_SCRIPT = resolvePath(moduleDir, 'ddviz.swift');
+// ddviz.swift and its assets/ folder live alongside this file.
+export const DEFAULT_DDVIZ_SCRIPT = resolvePath(moduleDir, 'ddviz.swift');
 
 /** Diagnostic logger threaded through the viz components. */
 export type Logger = (message: string) => void;
@@ -53,6 +53,11 @@ export interface DdvizClientOptions {
   isDebug?: boolean;
   /** Run the WebView without showing the panel (DDVIZ_HEADLESS=1). */
   isHeadless?: boolean;
+  /**
+   * Declare that the user opens ddviz on demand (DDVIZ_OPEN=on-demand): the
+   * panel stays hidden until shown, then pinned on top until closed.
+   */
+  isOpenedOnDemand?: boolean;
   /** Optional logger (defaults to a no-op). */
   log?: Logger;
   /** Datadog MCP client. When provided, the client answers `tools/call`
@@ -85,6 +90,12 @@ export interface ScreenshotResult {
   mimeType: string;
 }
 
+export interface DdvizClientStatus {
+  state: 'not-started' | 'starting' | 'running' | 'stopped' | 'failed';
+  pid?: number;
+  error?: string;
+}
+
 const stringifyError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Notification the MCP app (iframe) emits once it is ready — see the mcp-app spec. */
@@ -102,9 +113,12 @@ export class DdvizClient {
   private readonly scriptPath: string;
   private readonly isDebug: boolean;
   private readonly isHeadless: boolean;
+  private readonly isOpenedOnDemand: boolean;
   private readonly log: Logger;
   private child: ChildProcessWithoutNullStreams | null = null;
   private spawnPromise: Promise<void> | null = null;
+  private hasStarted = false;
+  private lastError: string | undefined;
   private readonly requestHandlers = new Map<string, (params: unknown, id: unknown) => unknown>();
   private readonly pendingCommands = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private commandSeq = 0;
@@ -120,6 +134,7 @@ export class DdvizClient {
     this.scriptPath = options.scriptPath ?? DEFAULT_DDVIZ_SCRIPT;
     this.isDebug = options.isDebug ?? false;
     this.isHeadless = options.isHeadless ?? false;
+    this.isOpenedOnDemand = options.isOpenedOnDemand ?? false;
     this.log = options.log ?? (() => undefined);
     if (options.mcp) this.registerToolCallProxy(options.mcp);
     // Pi doesn't consume widget model context yet. Acknowledge updates on every
@@ -151,6 +166,14 @@ export class DdvizClient {
     } else {
       this.requestHandlers.set(method, handler as (params: unknown, id: unknown) => unknown);
     }
+  }
+
+  /** Process status only: reading it never starts the host or changes panel visibility. */
+  getStatus(): DdvizClientStatus {
+    if (this.lastError) return { state: 'failed', error: this.lastError };
+    if (this.spawnPromise) return { state: 'starting', pid: this.child?.pid };
+    if (this.isAlive()) return { state: 'running', pid: this.child?.pid };
+    return { state: this.hasStarted ? 'stopped' : 'not-started' };
   }
 
   async backgroundRun(): Promise<void> {
@@ -217,10 +240,18 @@ export class DdvizClient {
         }
       }, timeoutMs);
     });
-    await this.writeJsonRpc({ jsonrpc: '2.0', id, method: 'snapshot' });
-    const result = (await promise) as { data?: string; mimeType?: string } | null;
-    if (!result?.data) throw new Error('snapshot returned no image data');
-    return { data: result.data, mimeType: result.mimeType ?? 'image/png' };
+    try {
+      await this.writeJsonRpc({ jsonrpc: '2.0', id, method: 'snapshot' });
+      const result = (await promise) as { data?: string; mimeType?: string } | null;
+      if (!result?.data) throw new Error('snapshot returned no image data');
+      this.lastError = undefined;
+      return { data: result.data, mimeType: result.mimeType ?? 'image/png' };
+    } catch (error) {
+      // A live host can still fail individual captures (timeout, JSON-RPC
+      // error); keep the failure for status until a capture succeeds again.
+      this.lastError = stringifyError(error);
+      throw error;
+    }
   }
 
   /**
@@ -256,9 +287,16 @@ export class DdvizClient {
   private async ensureRunning(): Promise<void> {
     if (this.isAlive()) return;
     if (!this.spawnPromise) {
-      this.spawnPromise = this.spawnDdviz().finally(() => {
-        this.spawnPromise = null;
-      });
+      this.hasStarted = true;
+      this.lastError = undefined;
+      this.spawnPromise = this.spawnDdviz()
+        .catch((error: unknown) => {
+          this.lastError ??= stringifyError(error);
+          throw error;
+        })
+        .finally(() => {
+          this.spawnPromise = null;
+        });
     }
     await this.spawnPromise;
   }
@@ -285,22 +323,30 @@ export class DdvizClient {
         ...process.env,
         ...(this.isDebug ? { DDVIZ_DEBUG: '1' } : {}),
         ...(this.isHeadless ? { DDVIZ_HEADLESS: '1' } : {}),
+        ...(this.isOpenedOnDemand ? { DDVIZ_OPEN: 'on-demand' } : {}),
         DDVIZ_PARENT_PID: String(process.pid),
         DDVIZ_IPC: 'stdio',
       },
     });
     child.on('error', (err) => {
       this.log(`[ddviz] child error: ${stringifyError(err)}`);
-      if (this.child === child) this.child = null;
+      if (this.child === child) {
+        this.lastError = stringifyError(err);
+        this.child = null;
+      }
     });
     // Catch EPIPE on stdin so it doesn't become an uncaught exception
     // when the child dies while we're writing to it.
     child.stdin.on('error', (err) => {
       this.log(`[ddviz] stdin error: ${stringifyError(err)}`);
+      if (this.child === child) this.lastError = stringifyError(err);
     });
     child.on('exit', (code, signal) => {
       this.log(`[ddviz] exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
-      if (this.child === child) this.child = null;
+      if (this.child === child) {
+        if (code !== 0) this.lastError = `ddviz exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
+        this.child = null;
+      }
     });
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString().trimEnd();
@@ -391,21 +437,30 @@ export class DdvizClient {
     }
   }
 
-  /** Dispatch a JSON-RPC request to its handler and reply with result or error. */
+  /** Dispatch a JSON-RPC request to its handler and reply with result or error.
+   * Never rejects: when the host is gone there is nobody left to answer. */
   private async handleRequest(request: JsonRpcRequest): Promise<void> {
     const { id, method, params } = request;
     const handler = this.requestHandlers.get(method);
-    if (!handler) {
-      await this.respondError(id, ErrorCode.MethodNotFound, `Method not found: ${method}`);
-      return;
-    }
     this.pendingRequests++;
     try {
-      const result = await handler(params, id);
-      await this.respond(id, result);
-    } catch (err) {
-      // no-dd-sa:datadog/typescript-errorinfoleak
-      await this.respondError(id, SERVER_ERROR, stringifyError(err));
+      if (!handler) {
+        await this.respondError(id, ErrorCode.MethodNotFound, `Method not found: ${method}`);
+        return;
+      }
+      try {
+        const result = await handler(params, id);
+        await this.respond(id, result);
+      } catch (err) {
+        if (this.isAlive()) {
+          // no-dd-sa:datadog/typescript-errorinfoleak
+          await this.respondError(id, SERVER_ERROR, stringifyError(err));
+        } else {
+          this.log(`[ddviz] dropped ${method} response: ${stringifyError(err)}`);
+        }
+      }
+    } catch (respondErr) {
+      this.log(`[ddviz] failed answering ${method}: ${stringifyError(respondErr)}`);
     } finally {
       this.pendingRequests--;
       if (this.pendingRequests === 0) this.onRequestDrained?.();

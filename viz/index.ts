@@ -2,20 +2,31 @@
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { Box, Image, Spacer, Text } from '@earendil-works/pi-tui';
+import { Box, Image, MouseRegion, Spacer, Text } from '@earendil-works/pi-tui';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import type { McpClient } from '../mcp-client.js';
 import type { SubtoolOverrides } from '../tools/proxy.js';
 import type { SubtoolConfig } from '../tools/types.js';
-import { createLogger, DdvizClient, type Logger, type ScreenshotResult } from './client.js';
+import {
+  createLogger,
+  DdvizClient,
+  type DdvizClientOptions,
+  type DdvizClientStatus,
+  type Logger,
+  type ScreenshotResult,
+} from './client.js';
 import { createUiMessageHandler } from './ui-message.js';
 import { checkActivation } from './compat.js';
+import { readLocalDdvizStatus, type LocalDdvizStatus } from './status.js';
 
 import type { JsonRpcNotification } from './jsonrpc2.js';
 
-// Keyboard shortcut to toggle the Datadog visualization panel.
-export const DDVIZ_TOGGLE_SHORTCUT = 'ctrl+shift+o';
+// Keyboard shortcut to show the Datadog visualization panel.
+export const DDVIZ_TOGGLE_SHORTCUT = 'shift+right';
+// Human-readable form of the shortcut for rendered hints (the key id spells
+// the arrow out, which reads like the letters r-i-g-h-t).
+export const DDVIZ_TOGGLE_SHORTCUT_LABEL = 'Shift+→';
 
 // Free-form viz metadata stored in `ProxyDetails.subtoolData`.
 interface VizSubtoolData {
@@ -101,6 +112,10 @@ class ScreenshotQueue {
     });
   }
 
+  getStatus(): DdvizClientStatus {
+    return this.headless.getStatus();
+  }
+
   async shutdown(): Promise<void> {
     this.stopped = true;
     this.cancelIdleShutdown();
@@ -166,6 +181,7 @@ const createSubtool = (
   toolName: string,
   log: Logger,
   getRuntime: (mcp: McpClient) => Promise<Runtime>,
+  togglePanel: () => Promise<void>,
 ): SubtoolConfig => ({
   async execute(_toolCallId, params, signal, onUpdate, ctx, mcp) {
     const { client, screenshotQueue } = await getRuntime(mcp);
@@ -227,6 +243,13 @@ const createSubtool = (
     const { isPartial, isError, showImages } = context;
     const { expanded } = options;
 
+    // The shortcut toggles (the panel may already be open), and the menubar
+    // icon is the second way back after a close.
+    const panelHint = theme.fg(
+      'muted',
+      `Press ${theme.bold(DDVIZ_TOGGLE_SHORTCUT_LABEL)} to show the interactive panel, or click the Datadog menu-bar icon`,
+    );
+
     const bgKey = isPartial ? 'toolPendingBg' : isError ? 'toolErrorBg' : 'toolSuccessBg';
     const box = new Box(1, 1, (s) => theme.bg(bgKey, s));
 
@@ -268,19 +291,11 @@ const createSubtool = (
       box.addChild(new Spacer(1));
       box.addChild(new Image(screenshot.data, screenshot.mimeType, imageTheme, imageSize));
       box.addChild(new Spacer(1));
-      box.addChild(
-        new Text(theme.fg('muted', `Press ${theme.bold(DDVIZ_TOGGLE_SHORTCUT)} to open the interactive panel`), 0, 0),
-      );
+      box.addChild(new Text(panelHint, 0, 0));
     } else {
       // No inline image (disabled, unsupported terminal, or capture failed) — skip the
-      // large placeholder and point straight at the interactive panel shortcut.
-      box.addChild(
-        new Text(
-          theme.fg('muted', `Press ${theme.bold(DDVIZ_TOGGLE_SHORTCUT)} to view this chart in the interactive panel`),
-          0,
-          0,
-        ),
-      );
+      // large placeholder and point straight at the interactive panel.
+      box.addChild(new Text(panelHint, 0, 0));
     }
 
     // Expanded: tool call details.
@@ -303,16 +318,35 @@ const createSubtool = (
         box.addChild(new Text(theme.fg('toolOutput', text), 0, 0));
       }
     }
-    return box;
+    if (isPartial || isError || !subtoolData?.toolResult?.structuredContent || subtoolData.toolResult.isError) {
+      return box;
+    }
+    // Handle fullscreen clicks before Pi's click-to-expand fallback, without
+    // capturing selection or scrolling gestures.
+    return new MouseRegion(box, (event) => {
+      if (event.type !== 'click' || event.button !== 'left') return undefined;
+      void togglePanel().catch((err: unknown) => {
+        log(`[viz] click toggle failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      return { handled: true };
+    });
   },
 });
+
+/** Options for `initVizRuntime`; tests inject the interactive client. */
+export interface VizRuntimeOptions {
+  createClient?: (options: DdvizClientOptions) => DdvizClient;
+}
 
 /**
  * Initialise the viz integration on compatible platforms and return the subtool
  * override map and a reset hook. Unsupported hosts stay text-only. Each runtime
  * is bound to an immutable client; switching discards both visible and headless UI.
  */
-export const initVizRuntime = (pi: ExtensionAPI): { subtools: SubtoolOverrides; reset(): Promise<void> } => {
+export const initVizRuntime = (
+  pi: ExtensionAPI,
+  options: VizRuntimeOptions = {},
+): { enabled: boolean; subtools: SubtoolOverrides; reset(): Promise<void>; getStatus(): Promise<LocalDdvizStatus> } => {
   const isDebug = process.env.DDVIZ_DEBUG === '1';
   const log = createLogger(isDebug);
   let runtime: Runtime | undefined;
@@ -334,7 +368,13 @@ export const initVizRuntime = (pi: ExtensionAPI): { subtools: SubtoolOverrides; 
     }
   };
   const reset = () => serialize(closeCurrent);
-  if (!checkActivation().ok) return { subtools: {}, reset };
+  const activation = checkActivation();
+  const getStatus = () =>
+    readLocalDdvizStatus(activation, () => ({
+      interactive: runtime?.client.getStatus() ?? { state: 'not-started' },
+      screenshots: runtime?.screenshotQueue.getStatus() ?? { state: 'not-started' },
+    }));
+  if (!activation.ok) return { enabled: activation.enabled, subtools: {}, reset, getStatus };
 
   // Subscribe before session_start; clients are created lazily and replaced on org switches.
   const onUiMessage = createUiMessageHandler(pi);
@@ -342,19 +382,29 @@ export const initVizRuntime = (pi: ExtensionAPI): { subtools: SubtoolOverrides; 
     serialize(async () => {
       if (runtime?.mcp === mcp) return runtime;
       await closeCurrent();
-      const client = new DdvizClient({ log, isDebug, mcp });
+      // pi lets the user open the panel on demand (Shift+Right Arrow, menubar icon).
+      const clientOptions: DdvizClientOptions = { log, isDebug, mcp, isOpenedOnDemand: true };
+      const client = options.createClient?.(clientOptions) ?? new DdvizClient(clientOptions);
       client.setRequestHandler('ui/message', onUiMessage);
       runtime = { mcp, client, screenshotQueue: new ScreenshotQueue(mcp, log) };
       return runtime;
     });
-  pi.registerShortcut(DDVIZ_TOGGLE_SHORTCUT, {
-    description: 'Toggle Datadog visualization panel',
-    handler: async (_ctx) => {
-      await runtime?.client.toggle();
-    },
+  const togglePanel = async (): Promise<void> => {
+    await runtime?.client.toggle();
+  };
+  const toggleShortcut = { description: 'Show Datadog visualization panel', handler: togglePanel };
+  pi.registerShortcut(DDVIZ_TOGGLE_SHORTCUT, toggleShortcut);
+  // Session replacement (/new, /resume, reload) must not leave a stale panel
+  // or menubar icon behind: tear the current runtime down like an org switch.
+  pi.on('session_shutdown', async () => {
+    log('[viz] session_shutdown — closing runtime');
+    await reset();
   });
+
   return {
-    subtools: Object.fromEntries(VizToolNames.map((name) => [name, createSubtool(name, log, getRuntime)])),
+    enabled: activation.enabled,
+    subtools: Object.fromEntries(VizToolNames.map((name) => [name, createSubtool(name, log, getRuntime, togglePanel)])),
     reset,
+    getStatus,
   };
 };
