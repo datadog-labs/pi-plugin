@@ -48,10 +48,10 @@ Use `/datadog toolsets`, or the connection screen, to configure toolsets for the
 The agent has three tools:
 
 - `datadog` discovers and invokes MCP tools for the selected organization.
-- `ddconfig` reports saved connection state; its `check` action probes the server without starting interactive sign-in.
+- `ddconfig` reports saved connection state; its `check` action probes the server without starting interactive sign-in, and its `switch` action moves the session to another saved connection, so the agent can compare orgs in one prompt.
 - `ddtoolsets` manages toolsets for the selected connection.
 
-`/datadog setup` and `/datadog configure` without arguments open the same connection screen for compatibility. Their old site/scope arguments and the separate `ddsetup` tool have been removed. Authentication and switching are user-controlled through `/datadog`.
+`/datadog setup` and `/datadog configure` without arguments open the same connection screen for compatibility. Their old site/scope arguments and the separate `ddsetup` tool have been removed. Sign-in and adding organizations are user-controlled through `/datadog`; the agent can only switch between connections you've already saved.
 
 ## Visualization panel (macOS preview)
 

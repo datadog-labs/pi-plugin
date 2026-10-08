@@ -12,7 +12,7 @@ import { createDatadogProxy } from './tools/proxy.js';
 import { initVizRuntime } from './viz/index.js';
 import { makeConnectionBuilder } from '#shared/url';
 
-const PLUGIN_VERSION = '0.7.19';
+const PLUGIN_VERSION = '0.7.20';
 const PLUGIN_ID = 'pi-plugin';
 const MCP_FILE = 'datadog.json';
 const MCP_ENABLED_TOOLSETS = 'core,visualizations';
@@ -23,7 +23,7 @@ const organizationNotice = async (connections: Connections): Promise<string | un
   try {
     const selected = await connections.current();
     if (!selected) return undefined;
-    return `The selected Datadog organization is ${profileLabel(selected.profile)} at ${selected.profile.domain}, UUID ${selected.profile.identity?.orgUuid ?? 'not yet verified'}. Datadog calls target this connection only. Ask the user to use /datadog to switch organizations; do not edit credential/config files to switch. Earlier results may belong to a different organization.`;
+    return `The selected Datadog organization is ${profileLabel(selected.profile)} at ${selected.profile.domain}, UUID ${selected.profile.identity?.orgUuid ?? 'not yet verified'}. Datadog calls target the selected connection only, and each datadog result names its organization. To use another saved organization, switch with ddconfig; ask the user to open /datadog to sign in or add one. Do not edit credential/config files to switch. Earlier results may belong to a different organization.`;
   } catch {
     return 'The Datadog selection is invalid. Ask the user to open /datadog; do not fall back to another organization.';
   }
