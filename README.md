@@ -51,6 +51,8 @@ The agent has three tools:
 - `ddconfig` reports saved connection state; its `check` action probes the server without starting interactive sign-in, and its `switch` action moves the session to another saved connection, so the agent can compare orgs in one prompt.
 - `ddtoolsets` manages toolsets for the selected connection.
 
+Prompts also carry the Datadog MCP Server's instructions for the selected organization, such as skill and access guidance. Pi connects at the start of a prompt to read them and leaves them out if the server can't be reached within a few seconds.
+
 `/datadog setup` and `/datadog configure` without arguments open the same connection screen for compatibility. Their old site/scope arguments and the separate `ddsetup` tool have been removed. Sign-in and adding organizations are user-controlled through `/datadog`; the agent can only switch between connections you've already saved.
 
 ## Visualization panel (macOS preview)
