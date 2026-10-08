@@ -20,6 +20,8 @@ export type ConnectionClient = {
   readonly authMode: 'oauth' | 'apiKey';
   identity(signal?: AbortSignal): Promise<OrgIdentity>;
   listTools(signal?: AbortSignal): Promise<Tool[]>;
+  // Caller-specific guidance the server returns during the MCP handshake.
+  instructions(signal?: AbortSignal): Promise<string | undefined>;
   readResource(uri: string, signal?: AbortSignal): Promise<ReadResourceResult>;
   callTool(name: string, args: Record<string, unknown> | undefined, signal?: AbortSignal): Promise<CallToolResult>;
   close(): Promise<void>;
@@ -67,6 +69,9 @@ export const createConnectionClient = (
     assertOpen();
     const next = new Client({ name: 'datadog-pi-plugin', version });
     let wire = transport();
+    // The SDK sends notifications/initialized without the caller's signal; closing the transport cancels it.
+    const abort = () => void wire.close().catch(() => undefined);
+    signal?.addEventListener('abort', abort, { once: true });
     try {
       try {
         await next.connect(wire, { signal });
@@ -92,6 +97,8 @@ export const createConnectionClient = (
       await next.close().catch(() => undefined);
       await wire.close().catch(() => undefined);
       throw error;
+    } finally {
+      signal?.removeEventListener('abort', abort);
     }
   };
   const ensure = async (signal?: AbortSignal): Promise<Client> => {
@@ -113,6 +120,7 @@ export const createConnectionClient = (
     authMode: auth.kind === 'oauth' ? 'oauth' : 'apiKey',
     identity: (signal) => run(async () => identity!, signal),
     listTools: (signal) => run(async (current) => (await current.listTools({}, { signal })).tools, signal),
+    instructions: (signal) => run(async (current) => current.getInstructions(), signal),
     readResource: (uri, signal) => run((current) => current.readResource({ uri }, { signal }), signal),
     callTool: (name, args, signal) =>
       run(
@@ -132,4 +140,4 @@ export const createConnectionClient = (
 
 export type AuthMode = 'oauth' | 'apiKey';
 export type McpCallToolArgs = Record<string, unknown> | undefined;
-export type McpClient = Omit<ConnectionClient, 'identity'>;
+export type McpClient = Omit<ConnectionClient, 'identity' | 'instructions'>;

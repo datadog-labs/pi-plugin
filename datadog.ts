@@ -12,12 +12,15 @@ import { createDatadogProxy } from './tools/proxy.js';
 import { initVizRuntime } from './viz/index.js';
 import { makeConnectionBuilder } from '#shared/url';
 
-const PLUGIN_VERSION = '0.7.20';
+const PLUGIN_VERSION = '0.7.21';
 const PLUGIN_ID = 'pi-plugin';
 const MCP_FILE = 'datadog.json';
 const MCP_ENABLED_TOOLSETS = 'core,visualizations';
 const SELECTION_ENTRY = 'datadog-selection';
 const ORGANIZATION_SECTION = 'datadog_organization';
+const SERVER_INSTRUCTIONS_SECTION = 'datadog_server_instructions';
+// Bounds how long a prompt waits on the first connection; a later prompt retries.
+const SERVER_INSTRUCTIONS_TIMEOUT_MS = 5_000;
 
 const organizationNotice = async (connections: Connections): Promise<string | undefined> => {
   try {
@@ -26,6 +29,17 @@ const organizationNotice = async (connections: Connections): Promise<string | un
     return `The selected Datadog organization is ${profileLabel(selected.profile)} at ${selected.profile.domain}, UUID ${selected.profile.identity?.orgUuid ?? 'not yet verified'}. Datadog calls target the selected connection only, and each datadog result names its organization. To use another saved organization, switch with ddconfig; ask the user to open /datadog to sign in or add one. Do not edit credential/config files to switch. Earlier results may belong to a different organization.`;
   } catch {
     return 'The Datadog selection is invalid. Ask the user to open /datadog; do not fall back to another organization.';
+  }
+};
+
+// The server returns caller-specific guidance (skills, access notes) only during the MCP handshake.
+const serverInstructions = async (connections: Connections): Promise<string | undefined> => {
+  try {
+    const { client } = await connections.connection(AbortSignal.timeout(SERVER_INSTRUCTIONS_TIMEOUT_MS));
+    const instructions = await client.instructions();
+    return instructions && `Instructions from the Datadog MCP Server, for the datadog tool:\n${instructions}`;
+  } catch {
+    return undefined;
   }
 };
 
@@ -65,8 +79,12 @@ export default function activate(pi: ExtensionAPI): void {
   });
   // A prompt section, unlike a returned message, is only re-sent to the model when its text changes.
   pi.on('before_agent_start', async ({ systemPromptOptions: { sections } }) => {
-    const notice = await organizationNotice(connections);
+    const [notice, instructions] = await Promise.all([
+      organizationNotice(connections),
+      serverInstructions(connections),
+    ]);
     if (notice) sections[ORGANIZATION_SECTION] = notice;
+    if (instructions) sections[SERVER_INSTRUCTIONS_SECTION] = instructions;
   });
   pi.registerTool(createDatadogProxy(deps, viz.subtools));
   pi.registerTool(createDdconfig(deps));
