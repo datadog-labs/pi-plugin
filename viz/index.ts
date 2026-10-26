@@ -2,7 +2,7 @@
 // This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright 2026 Datadog, Inc.
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { Box, Image, MouseRegion, Spacer, Text } from '@earendil-works/pi-tui';
+import { Box, Image, MouseRegion, Spacer, Text, type TUI } from '@earendil-works/pi-tui';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import type { McpClient } from '../mcp-client.js';
@@ -17,8 +17,9 @@ import {
   type ScreenshotResult,
 } from './client.js';
 import { createUiMessageHandler } from './ui-message.js';
-import { checkActivation } from './compat.js';
-import { readLocalDdvizStatus, type LocalDdvizStatus } from './status.js';
+import { isRenderableVizResult, SHOW_UI_TOOL_NAME, VIZ_TOOL_NAMES } from './tool-result.js';
+import { checkActivation, checkSupportDiagnostics, type SupportDiagnostics } from './compat.js';
+import { readLocalDdvizStatus, makeStatusProbes, type LocalDdvizStatus } from './status.js';
 
 import type { JsonRpcNotification } from './jsonrpc2.js';
 
@@ -59,9 +60,9 @@ class ScreenshotQueue {
   private stopped = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(mcp: McpClient | undefined, log: Logger) {
+  constructor(headless: DdvizClient, log: Logger) {
     this.log = log;
-    this.headless = new DdvizClient({ isHeadless: true, log, mcp });
+    this.headless = headless;
   }
 
   private scheduleIdleShutdown(): void {
@@ -160,13 +161,6 @@ class ScreenshotQueue {
 // Image sizing (terminal rows / cells).
 const IMAGE_EXPANDED = { maxHeightCells: 24, maxWidthCells: 160 } as const;
 
-/**
- * Upstream Datadog tools whose results carry structuredContent the viz panel
- * can render. The entry point iterates this list to register a subtool override
- * per name; the restore guard reuses it to recognize replayable widgets.
- */
-const VizToolNames = ['get_widget', 'visualize_tabular_data'] as const;
-
 /** Wrap a CallToolResult as the JSON-RPC notification the Swift IPCStdioAdapter expects. */
 const toToolResultNotification = (raw: CallToolResult): JsonRpcNotification => ({
   jsonrpc: '2.0',
@@ -180,11 +174,12 @@ type Runtime = { mcp: McpClient; client: DdvizClient; screenshotQueue: Screensho
 const createSubtool = (
   toolName: string,
   log: Logger,
+  ensureSupport: () => Promise<SupportDiagnostics>,
   getRuntime: (mcp: McpClient) => Promise<Runtime>,
   togglePanel: () => Promise<void>,
+  isFullscreen: () => boolean,
 ): SubtoolConfig => ({
   async execute(_toolCallId, params, signal, onUpdate, ctx, mcp) {
-    const { client, screenshotQueue } = await getRuntime(mcp);
     const emitPhase = (phase: VizSubtoolData['phase']) =>
       onUpdate?.({
         content: [],
@@ -195,8 +190,9 @@ const createSubtool = (
     const raw = await mcp.callTool(params.tool!, params.args, signal);
     const text = raw.content.map((c) => (c.type === 'text' ? c.text : JSON.stringify(c))).join('\n');
 
-    // Only widgets carry structured content, and renderResult only runs in TUI mode.
-    if (!raw.structuredContent || ctx.mode !== 'tui') {
+    // show_ui supports native structured results and product ViewSpecs in _meta.
+    // The custom renderer runs only in interactive TUI mode.
+    if (raw.isError || !isRenderableVizResult(toolName, raw) || ctx.mode !== 'tui') {
       return {
         content: [{ type: 'text', text }],
         details: {
@@ -208,6 +204,23 @@ const createSubtool = (
       };
     }
 
+    // Toolchain support is probed here — never at startup — so unsupported
+    // machines pay nothing until a chart actually needs the panel, and an
+    // unsupported setup silently keeps the ordinary text result.
+    const support = await ensureSupport();
+    if (Object.values(support).some((check) => check.state === 'fail')) {
+      return {
+        content: [{ type: 'text', text }],
+        details: {
+          state: 'called',
+          tool: params.tool!,
+          isError: raw.isError ?? false,
+          structuredContent: raw.structuredContent,
+        },
+      };
+    }
+
+    const { client, screenshotQueue } = await getRuntime(mcp);
     const notification = toToolResultNotification(raw);
 
     void client.forward(notification);
@@ -239,24 +252,32 @@ const createSubtool = (
     const subtoolData = ('subtoolData' in details ? details.subtoolData : undefined) as VizSubtoolData | undefined;
     const phase = subtoolData?.phase;
     const screenshot = subtoolData?.screenshot;
+    if (
+      details.state !== 'called' ||
+      details.isError ||
+      (!phase && (!subtoolData?.toolResult || !isRenderableVizResult(toolName, subtoolData.toolResult)))
+    ) {
+      return undefined;
+    }
 
     const { isPartial, isError, showImages } = context;
     const { expanded } = options;
 
-    // The shortcut toggles (the panel may already be open), and the menubar
-    // icon is the second way back after a close.
+    // Completed nonvisual responses retain the proxy's text and error rendering.
+    if (!isPartial && !subtoolData.toolResult) return undefined;
+
     const panelHint = theme.fg(
       'muted',
-      `Press ${theme.bold(DDVIZ_TOGGLE_SHORTCUT_LABEL)} to show the interactive panel, or click the Datadog menu-bar icon`,
+      isFullscreen()
+        ? `Click to open the interactive panel or press ${theme.bold(DDVIZ_TOGGLE_SHORTCUT_LABEL)}`
+        : `Press ${theme.bold(DDVIZ_TOGGLE_SHORTCUT_LABEL)} to show the interactive panel, or click the Datadog menu-bar icon`,
     );
 
     const bgKey = isPartial ? 'toolPendingBg' : isError ? 'toolErrorBg' : 'toolSuccessBg';
     const box = new Box(1, 1, (s) => theme.bg(bgKey, s));
 
-    const header = theme.fg(
-      'accent',
-      theme.bold(`Datadog Widget${details.profile ? ` · ${details.profile.label}` : ''}`),
-    );
+    const label = toolName === SHOW_UI_TOOL_NAME ? 'Datadog UI' : 'Datadog Widget';
+    const header = theme.fg('accent', theme.bold(`${label}${details.profile ? ` · ${details.profile.label}` : ''}`));
     let phaseLabel: string;
     switch (phase) {
       case 'fetching':
@@ -300,7 +321,7 @@ const createSubtool = (
 
     // Expanded: tool call details.
     if (expanded && !isPartial && !isError) {
-      const args = subtoolData?.args;
+      const args = subtoolData.args;
       const toolLabel = theme.fg('muted', `Tool: ${theme.bold(toolName)}`);
       box.addChild(new Text(toolLabel, 0, 0));
       if (args && Object.keys(args).length > 0) {
@@ -318,7 +339,13 @@ const createSubtool = (
         box.addChild(new Text(theme.fg('toolOutput', text), 0, 0));
       }
     }
-    if (isPartial || isError || !subtoolData?.toolResult?.structuredContent || subtoolData.toolResult.isError) {
+    if (
+      isPartial ||
+      isError ||
+      !subtoolData.toolResult ||
+      subtoolData.toolResult.isError ||
+      !isRenderableVizResult(toolName, subtoolData.toolResult)
+    ) {
       return box;
     }
     // Handle fullscreen clicks before Pi's click-to-expand fallback, without
@@ -333,8 +360,10 @@ const createSubtool = (
   },
 });
 
-/** Options for `initVizRuntime`; tests inject the interactive client. */
+/** Options for `initVizRuntime`; tests inject activation, support probing, and native clients. */
 export interface VizRuntimeOptions {
+  checkActivation?: typeof checkActivation;
+  probeSupport?: () => Promise<SupportDiagnostics>;
   createClient?: (options: DdvizClientOptions) => DdvizClient;
 }
 
@@ -346,7 +375,7 @@ export interface VizRuntimeOptions {
 export const initVizRuntime = (
   pi: ExtensionAPI,
   options: VizRuntimeOptions = {},
-): { enabled: boolean; subtools: SubtoolOverrides; reset(): Promise<void>; getStatus(): Promise<LocalDdvizStatus> } => {
+): { subtools: SubtoolOverrides; reset(): Promise<void>; getStatus(): Promise<LocalDdvizStatus> } => {
   const isDebug = process.env.DDVIZ_DEBUG === '1';
   const log = createLogger(isDebug);
   let runtime: Runtime | undefined;
@@ -368,25 +397,52 @@ export const initVizRuntime = (
     }
   };
   const reset = () => serialize(closeCurrent);
-  const activation = checkActivation();
+  const activation = (options.checkActivation ?? checkActivation)();
+  // Machine support is fixed for the session: the first chart (or a status
+  // request) pays for the probes, concurrent callers share them, and the
+  // cached result backs both rendering and /datadog ddviz. Restart Pi to recheck.
+  let supportPromise: Promise<SupportDiagnostics> | undefined;
+  const ensureSupport = (): Promise<SupportDiagnostics> =>
+    (supportPromise ??= (options.probeSupport ?? checkSupportDiagnostics)());
   const getStatus = () =>
-    readLocalDdvizStatus(activation, () => ({
-      interactive: runtime?.client.getStatus() ?? { state: 'not-started' },
-      screenshots: runtime?.screenshotQueue.getStatus() ?? { state: 'not-started' },
-    }));
-  if (!activation.ok) return { enabled: activation.enabled, subtools: {}, reset, getStatus };
+    readLocalDdvizStatus(
+      activation,
+      () => ({
+        interactive: runtime?.client.getStatus() ?? { state: 'not-started' },
+        screenshots: runtime?.screenshotQueue.getStatus() ?? { state: 'not-started' },
+      }),
+      makeStatusProbes(ensureSupport),
+    );
+  if (!activation.ok) return { subtools: {}, reset, getStatus };
+
+  let tui: TUI | undefined;
+  pi.on('session_start', (_event, ctx) => {
+    tui = undefined;
+    if (ctx.mode !== 'tui') return;
+    // Widget factories expose Pi's live TUI reference, which follows renderer switches.
+    ctx.ui.setWidget('datadog-ddviz-tui', (currentTui) => {
+      tui = currentTui;
+      return new Spacer(0);
+    });
+  });
+  const isFullscreen = () => tui?.mode === 'fullscreen';
 
   // Subscribe before session_start; clients are created lazily and replaced on org switches.
   const onUiMessage = createUiMessageHandler(pi);
+  const createClient = options.createClient ?? ((clientOptions: DdvizClientOptions) => new DdvizClient(clientOptions));
   const getRuntime = (mcp: McpClient): Promise<Runtime> =>
     serialize(async () => {
       if (runtime?.mcp === mcp) return runtime;
       await closeCurrent();
       // pi lets the user open the panel on demand (Shift+Right Arrow, menubar icon).
       const clientOptions: DdvizClientOptions = { log, isDebug, mcp, isOpenedOnDemand: true };
-      const client = options.createClient?.(clientOptions) ?? new DdvizClient(clientOptions);
+      const client = createClient(clientOptions);
       client.setRequestHandler('ui/message', onUiMessage);
-      runtime = { mcp, client, screenshotQueue: new ScreenshotQueue(mcp, log) };
+      runtime = {
+        mcp,
+        client,
+        screenshotQueue: new ScreenshotQueue(createClient({ isHeadless: true, log, mcp }), log),
+      };
       return runtime;
     });
   const togglePanel = async (): Promise<void> => {
@@ -402,8 +458,12 @@ export const initVizRuntime = (
   });
 
   return {
-    enabled: activation.enabled,
-    subtools: Object.fromEntries(VizToolNames.map((name) => [name, createSubtool(name, log, getRuntime, togglePanel)])),
+    subtools: Object.fromEntries(
+      VIZ_TOOL_NAMES.map((name) => [
+        name,
+        createSubtool(name, log, ensureSupport, getRuntime, togglePanel, isFullscreen),
+      ]),
+    ),
     reset,
     getStatus,
   };

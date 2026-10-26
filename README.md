@@ -55,13 +55,17 @@ Prompts also carry the Datadog MCP Server's instructions for the selected organi
 
 `/datadog setup` and `/datadog configure` without arguments open the same connection screen for compatibility. Their old site/scope arguments and the separate `ddsetup` tool have been removed. Sign-in and adding organizations are user-controlled through `/datadog`; the agent can only switch between connections you've already saved.
 
-## Visualization panel (macOS preview)
+## Visualization panel (macOS)
 
-Start Pi with `DDVIZ_ENABLED=1` to enable ddviz (requires macOS 13+ and Xcode Command Line Tools). After generating a Datadog chart, press **Shift+Right Arrow** (Shift+→) in Pi's editor to show the interactive panel. This works in Apple Terminal.app without extra keyboard configuration and does not conflict with Pi's default bindings.
+Datadog charts use ddviz automatically in Pi's interactive terminal on macOS 13+ with Xcode Command Line Tools and Swift 5.7+. No opt-in environment variable is needed. Other platforms and machines missing these prerequisites keep ordinary text results without warnings.
+
+Toolchain checks run only on the first chart-producing response or an explicit `/datadog ddviz` request, never at startup. Their result is shared for the session; restart Pi after fixing prerequisites. Text-only responses, tool errors, and non-interactive modes do not trigger these checks or start the panel.
+
+After generating a Datadog chart, press **Shift+Right Arrow** (Shift+→) in Pi's editor to show the interactive panel. This works in Apple Terminal.app without extra keyboard configuration and does not conflict with Pi's default bindings.
 
 When the panel has focus, press **Escape** or **Cmd+W** to close it. Shift+Right Arrow is not intercepted there, so text selection in the panel remains available.
 
-Run `/datadog ddviz` to check whether ddviz is enabled, supported, and available on this machine:
+Run `/datadog ddviz` on any platform to check local visualization support and server connectivity:
 
 - **Machine prerequisites** — macOS, Xcode Command Line Tools, Swift
 - **Installation** — the plugin's bundled files
@@ -69,7 +73,7 @@ Run `/datadog ddviz` to check whether ddviz is enabled, supported, and available
 - **Runtime** — whether the visualization panel's processes are running
 - **Connectivity** — reachability of the selected Datadog organization
 
-Each failing check explains what to do about it. The command is read-only: it never starts the panel, changes the organization, signs in, or enables the feature. Not running is the normal steady state; the runtime starts on the first chart-producing tool call.
+Each failing check explains what to do about it. The command is read-only: it never starts the panel, changes the organization, signs in, or changes server-side rollout controls. Connectivity does not establish whether the server will return a chart; text-only responses use ordinary rendering. Not running is the normal steady state; the runtime starts on the first supported chart-producing tool call.
 
 ### Why Shift+Right Arrow?
 
