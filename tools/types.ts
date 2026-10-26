@@ -52,7 +52,10 @@ export type ProxyToolResult = AgentToolResult<ProxyDetails>;
 
 export type ProxyToolDefinition = ToolDefinition<typeof proxyParameters, ProxyDetails>;
 export type SubtoolRenderCall = NonNullable<ProxyToolDefinition['renderCall']>;
-export type SubtoolRenderResult = NonNullable<ProxyToolDefinition['renderResult']>;
+/** Return undefined to use the proxy's default result renderer. */
+export type SubtoolRenderResult = (
+  ...args: Parameters<NonNullable<ProxyToolDefinition['renderResult']>>
+) => ReturnType<NonNullable<ProxyToolDefinition['renderResult']>> | undefined;
 
 // Mirrors ToolDefinition.execute: (toolCallId, params, signal, onUpdate, ctx),
 // using the proxy params (so subtools read params.tool/params.args themselves)
@@ -69,6 +72,7 @@ export type SubtoolExecutor = (
 
 export interface SubtoolConfig {
   renderCall?: SubtoolRenderCall;
-  renderResult?: SubtoolRenderResult;
+  /** Return undefined to use the proxy's default result renderer. */
+  renderResult?: (...args: Parameters<SubtoolRenderResult>) => ReturnType<SubtoolRenderResult> | undefined;
   execute?: SubtoolExecutor;
 }

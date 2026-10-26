@@ -1,7 +1,5 @@
-import { execFile } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { promisify } from 'node:util';
 import { getCapabilities, type ImageProtocol } from '@earendil-works/pi-tui';
 import { DEFAULT_DDVIZ_SCRIPT, type DdvizClientStatus } from './client.js';
 import { profileLabel } from '../config.js';
@@ -20,10 +18,9 @@ export interface VizRuntimeStatus {
 }
 
 export interface LocalDdvizStatus {
-  enabled: boolean;
   supported: boolean;
   available: boolean;
-  activation: ActivationStatus & { enabled: boolean };
+  activation: ActivationStatus;
   checks: SupportDiagnostics & { bundle: DiagnosticCheck; terminalImages: DiagnosticCheck };
   runtime: VizRuntimeStatus;
 }
@@ -80,22 +77,20 @@ export const checkServerAvailability = async (connections: Connections): Promise
 };
 
 interface StatusProbes {
-  support(): SupportDiagnostics;
-  swiftVersion(): Promise<string>;
+  /** Shared, session-cached support diagnostics — the same probe rendering uses. */
+  support(): Promise<SupportDiagnostics>;
   terminalImages(): ImageProtocol;
   scriptPath: string;
 }
 
-const execFileAsync = promisify(execFile);
-const defaultProbes: StatusProbes = {
-  support: checkSupportDiagnostics,
-  swiftVersion: async () => {
-    const { stdout } = await execFileAsync('swift', ['--version'], { timeout: 3_000, maxBuffer: 64 * 1024 });
-    return stdout.trim().split('\n')[0];
-  },
+/** Status probes bound to a shared support probe, so /datadog ddviz reuses the cached result. */
+export const makeStatusProbes = (support: () => Promise<SupportDiagnostics>): StatusProbes => ({
+  support,
   terminalImages: () => getCapabilities().images,
   scriptPath: DEFAULT_DDVIZ_SCRIPT,
-};
+});
+
+const defaultProbes: StatusProbes = makeStatusProbes(checkSupportDiagnostics);
 
 const isFile = (path: string): boolean => {
   try {
@@ -106,24 +101,11 @@ const isFile = (path: string): boolean => {
 };
 
 export const readLocalDdvizStatus = async (
-  activation: ActivationStatus & { enabled: boolean },
+  activation: ActivationStatus,
   getRuntime: () => VizRuntimeStatus,
   probes: StatusProbes = defaultProbes,
 ): Promise<LocalDdvizStatus> => {
-  const support = probes.support();
-  // Activation checks PATH only. Status also diagnoses an installed but unusable toolchain.
-  if (support.swift.state === 'ok') {
-    try {
-      const version = await probes.swiftVersion();
-      support.swift = { state: 'ok', detail: `${version || 'version unknown'} (${support.swift.detail})` };
-    } catch {
-      support.swift = {
-        state: 'fail',
-        detail: 'swift --version failed or timed out',
-        nextAction: 'Run `swift --version` in your terminal and resolve the toolchain error, then restart Pi.',
-      };
-    }
-  }
+  const support = await probes.support();
 
   const root = dirname(probes.scriptPath);
   const requiredFiles = [probes.scriptPath, join(root, 'assets', 'mcp-host.html')];
@@ -150,7 +132,6 @@ export const readLocalDdvizStatus = async (
   const supported = Object.values(support).every((check) => check.state === 'ok');
   const runtime = getRuntime();
   return {
-    enabled: activation.enabled,
     supported,
     available:
       activation.ok &&
@@ -206,8 +187,6 @@ export const formatLocalDdvizStatus = (
       ...fixes.map((fix) => `Next: ${fix}`),
     ].join('\n');
   }
-  // Claude's first line answers "is it on?"; ours answers "can this machine render charts?",
-  // since the gate being on is implied by the command being reachable at all.
   const lines = [`ddviz: ${status.available ? 'supported' : 'not supported'}`, ''];
   // Panel rows (inline images, runtime, screenshots) and panel hints only
   // make sense when the panel could actually run: toolchain present and bundle intact.
@@ -251,9 +230,6 @@ export const formatLocalDdvizStatus = (
   lines.push('', `blocking: ${blocking}`);
 
   const fixes = Object.values(status.checks).flatMap((check) => (check.nextAction ? [check.nextAction] : []));
-  if (status.enabled && !status.activation.ok && status.supported) {
-    fixes.push('Restart Pi to recheck activation after fixing the prerequisites.');
-  }
   if (
     panelPossible &&
     (status.runtime.interactive.state === 'failed' ||

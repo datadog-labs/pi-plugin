@@ -12,7 +12,7 @@ import { checkServerAvailability, formatLocalDdvizStatus, type LocalDdvizStatus 
 export const registerDatadogCommands = (
   pi: ExtensionAPI,
   deps: ToolDeps,
-  viz: { enabled: boolean; getStatus(): Promise<LocalDdvizStatus> },
+  viz: { getStatus(): Promise<LocalDdvizStatus> },
 ): void => {
   const completions = [
     { value: 'toolsets', label: 'toolsets', description: 'Configure toolsets for the selected organization' },
@@ -22,11 +22,9 @@ export const registerDatadogCommands = (
       label: 'ddviz status',
       description: 'Show visualization status and diagnostics (read-only)',
     },
-  ].filter((item) => viz.enabled || !item.value.startsWith('ddviz'));
+  ];
   pi.registerCommand('datadog', {
-    description: viz.enabled
-      ? 'Manage Datadog connections and toolsets, or check visualization status'
-      : 'Manage Datadog connections and toolsets',
+    description: 'Manage Datadog connections and toolsets, or check visualization status',
     getArgumentCompletions: (prefix) => {
       const input = prefix.trimStart();
       const matches = completions.filter(
@@ -79,9 +77,8 @@ export const registerDatadogCommands = (
         } else if (['', 'setup', 'configure', 'config'].includes(command))
           await manageConnections(deps.connections, ctx);
         else {
-          const ddvizHint = viz.enabled ? ' or /datadog ddviz to check visualization status' : '';
           ctx.ui.notify(
-            `Use /datadog to manage connections, /datadog toolsets to configure toolsets${ddvizHint}. Setup and site changes now live in the connection screen.`,
+            'Use /datadog to manage connections, /datadog toolsets to configure toolsets or /datadog ddviz to check visualization status. Setup and site changes now live in the connection screen.',
             'info',
           );
         }

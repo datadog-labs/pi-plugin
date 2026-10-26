@@ -58,9 +58,8 @@ export const createDatadogProxy = (
       // Subtool rendering if override
       const subtool = 'tool' in details ? details.tool : undefined;
       const renderer = subtool ? subtools[subtool]?.renderResult : undefined;
-      if (renderer) {
-        return renderer(result, options, theme, context);
-      }
+      const rendered = renderer?.(result, options, theme, context);
+      if (rendered) return rendered;
 
       // Default rendering
       const bgKey = (() => {

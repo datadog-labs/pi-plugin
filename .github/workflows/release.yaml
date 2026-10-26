@@ -29,7 +29,7 @@ jobs:
           MANIFEST=$(find . -maxdepth 2 -name plugin.json -path '*/.*-plugin/*' | head -1)
           if [ -n "$MANIFEST" ]; then
             VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('${MANIFEST}','utf8')).version)")
-          elif [ -f plugin.json ]; then
+          elif [ -f plugin.json ] && grep -q '"version"' plugin.json; then
             VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('plugin.json','utf8')).version)")
           elif [ -f package.json ]; then
             VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")
